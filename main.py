@@ -11,7 +11,6 @@ from hydrogram.errors import FloodWait, SessionPasswordNeeded
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-# .exe 실행 환경과 파이썬 스크립트 실행 환경 모두 완벽 대응
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
@@ -22,7 +21,7 @@ CONFIG_FILE = os.path.join(DATA_DIR, "joiner_config.json")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # ==========================================
-# 🎨 1. 커스텀 타이틀바 (기존 코드에서 추출)
+# 🎨 1. 커스텀 타이틀바
 # ==========================================
 class CustomTitleBar(QtWidgets.QWidget):
     def __init__(self, parent):
@@ -70,12 +69,13 @@ class CustomTitleBar(QtWidgets.QWidget):
 class LoginWorker(QThread):
     log_signal = pyqtSignal(str)
     auth_code_needed = pyqtSignal(str)
+    password_needed = pyqtSignal()
     login_success = pyqtSignal()
 
-    def __init__(self, api_id, api_hash, phone, phone_code_hash=None, auth_code=None):
+    def __init__(self, api_id, api_hash, phone, phone_code_hash=None, auth_code=None, password=None):
         super().__init__()
         self.api_id, self.api_hash, self.phone = api_id, api_hash, phone
-        self.phone_code_hash, self.auth_code = phone_code_hash, auth_code
+        self.phone_code_hash, self.auth_code, self.password = phone_code_hash, auth_code, password
 
     def run(self): asyncio.run(self.process_login())
 
@@ -83,7 +83,12 @@ class LoginWorker(QThread):
         app = Client("joiner_session", api_id=self.api_id, api_hash=self.api_hash, workdir=DATA_DIR)
         await app.connect()
         try:
-            if not self.auth_code:
+            if self.password:
+                self.log_signal.emit("2단계 인증 비밀번호 확인 중...")
+                await app.check_password(self.password)
+                self.log_signal.emit("✅ 2단계 인증 및 로그인 성공! 세션이 유지됩니다.")
+                self.login_success.emit()
+            elif not self.auth_code:
                 self.log_signal.emit("텔레그램 서버로 인증번호 발송 요청 중...")
                 sent = await app.send_code(self.phone)
                 self.log_signal.emit("✅ 인증번호 발송 완료! 앱을 확인해주세요.")
@@ -94,7 +99,8 @@ class LoginWorker(QThread):
                 self.log_signal.emit("✅ 로그인 성공! 이제 세션이 유지됩니다.")
                 self.login_success.emit()
         except SessionPasswordNeeded:
-            self.log_signal.emit("❌ 2단계 인증이 설정되어 있습니다. 해제 후 다시 시도해주세요.")
+            self.log_signal.emit("🔒 2단계 인증(비밀번호)이 필요합니다.")
+            self.password_needed.emit()
         except Exception as e:
             self.log_signal.emit(f"❌ 로그인 실패: {e}")
         finally:
@@ -127,7 +133,6 @@ class JoinWorker(QThread):
                         self.log_signal.emit(f"✅ 입장 완료: {link}")
                         joined = True
                         
-                        # 사람처럼 보이도록 불규칙한 안전 딜레이 적용 (15~35초)
                         delay = random.uniform(15, 35)
                         self.log_signal.emit(f"휴식: {int(delay)}초 대기...")
                         await asyncio.sleep(delay)
@@ -137,7 +142,6 @@ class JoinWorker(QThread):
                         self.log_signal.emit(f"🚨 [플러드 웨이트 감지] 서버 제한 조치로 {wait_time}초 동안 1차 대기합니다.")
                         await asyncio.sleep(wait_time)
                         
-                        # 제한 해제 직후 즉시 재가입 방지를 위한 3~5분(180~300초) 추가 랜덤 딜레이
                         extra_delay = random.uniform(180, 300)
                         self.log_signal.emit(f"🛡️ [계정 보호] 제한이 풀렸으나 안전을 위해 {int(extra_delay)}초(약 {int(extra_delay/60)}분) 추가 대기합니다...")
                         await asyncio.sleep(extra_delay)
@@ -146,19 +150,19 @@ class JoinWorker(QThread):
                         
                     except Exception as e:
                         self.log_signal.emit(f"❌ 입장 실패 ({link}): {e}")
-                        break # 알 수 없는 오류(방 삭제 등) 시 다음 방으로 넘어감
+                        break 
                         
         self.finished_signal.emit()
 
 # ==========================================
-# 🚀 3. 메인 UI (기존 테마 및 QSS 이식)
+# 🚀 3. 메인 UI
 # ==========================================
 class AutoJoinerApp(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedSize(600, 750)
+        self.setFixedSize(600, 800)
         self.phone_code_hash = None
         self.init_ui()
         self.load_config()
@@ -169,22 +173,25 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         self.setCentralWidget(self.central_widget)
         self.central_widget.setObjectName("MainContainer")
         
-        # 🔥 기존 매크로의 메인 CSS 복사 및 이식
         self.central_widget.setStyleSheet("""
             * { font-family: 'Pretendard', 'Malgun Gothic', 'Segoe UI', sans-serif; }
             QWidget#MainContainer { background-color: #0b0f19; border-radius: 16px; border: 1px solid #1e293b; }
             QLabel { color: #e2e8f0; font-size: 13px; font-weight: bold; }
-            QLineEdit, QTextEdit { 
+            QLineEdit, QTextEdit, QListWidget { 
                 background-color: #1e293b; border: 2px solid #334155; border-radius: 8px; 
-                padding: 10px; color: #f8fafc; font-weight: bold; font-size: 13px; 
+                padding: 10px; color: #f8fafc; font-weight: bold; font-size: 13px; outline: none;
             }
-            QLineEdit:focus, QTextEdit:focus { border: 2px solid #3b82f6; background-color: #0f172a; color: #60a5fa; }
+            QLineEdit:focus, QTextEdit:focus, QListWidget:focus { border: 2px solid #3b82f6; background-color: #0f172a; color: #60a5fa; }
+            QListWidget::item { padding: 5px; border-bottom: 1px solid #334155; }
+            QListWidget::item:selected { background-color: #2563eb; color: white; border-radius: 4px; }
             QGroupBox { border: 2px solid #334155; border-radius: 12px; margin-top: 15px; padding-top: 15px; font-weight: bold; color: #94a3b8; background-color: #0f172a; }
             QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 15px; top: 0px; background-color: #1e293b; padding: 2px 10px; color: #60a5fa; border-radius: 6px;}
             QPushButton { background-color: #1e232d; color: #94a3b8; border: 1px solid #2d3748; border-radius: 8px; font-size: 13px; font-weight: bold; padding: 8px; }
             QPushButton:hover { background-color: #2a3140; border: 1px solid #475569; color: #e2e8f0; }
-            QPushButton#LoginBtn { background-color: #1e232d; color: #60a5fa; border: 1px solid #2d3748; border-radius: 10px; font-size: 14px; font-weight: bold; }
-            QPushButton#LoginBtn:hover { background-color: #2a3140; border: 1px solid #3b82f6; color: #93c5fd; }
+            QPushButton#ActionBtn { background-color: #1e232d; color: #60a5fa; border: 1px solid #2d3748; border-radius: 8px; font-size: 13px; font-weight: bold; }
+            QPushButton#ActionBtn:hover { background-color: #2a3140; border: 1px solid #3b82f6; color: #93c5fd; }
+            QPushButton#DelBtn { background-color: #2d1e23; color: #f87171; border: 1px solid #4a2d35; border-radius: 8px; font-size: 13px; font-weight: bold; }
+            QPushButton#DelBtn:hover { background-color: #3f2a31; border: 1px solid #ef4444; color: #fca5a5; }
             QPushButton#StartBtn { background-color: #172a22; color: #4ade80; border: 1px solid #204a31; border-radius: 10px; font-size: 16px; font-weight: bold; letter-spacing: 1px; }
             QPushButton#StartBtn:hover { background-color: #1e3b2e; border: 1px solid #22c55e; color: #86efac; }
             QPushButton#StartBtn:disabled { background-color: #0f172a; color: #475569; border: 1px solid #1e293b; }
@@ -194,7 +201,6 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # 1. 타이틀바
         self.title_bar = CustomTitleBar(self)
         main_layout.addWidget(self.title_bar)
 
@@ -202,7 +208,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         content_layout.setContentsMargins(20, 10, 20, 20)
         content_layout.setSpacing(15)
 
-        # 2. API 로그인 섹션
+        # 1. API 로그인 섹션
         api_group = QtWidgets.QGroupBox("1. API 및 계정 연동 (세션 유지됨)")
         api_layout = QtWidgets.QVBoxLayout(api_group)
         
@@ -215,7 +221,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         row2 = QtWidgets.QHBoxLayout()
         self.inp_phone = QtWidgets.QLineEdit(); self.inp_phone.setPlaceholderText("전화번호 (+82...)")
         self.btn_send_code = QtWidgets.QPushButton("인증 요청")
-        self.btn_send_code.setObjectName("LoginBtn")
+        self.btn_send_code.setObjectName("ActionBtn")
         self.btn_send_code.clicked.connect(self.request_auth_code)
         row2.addWidget(self.inp_phone); row2.addWidget(self.btn_send_code)
         api_layout.addLayout(row2)
@@ -225,7 +231,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         auth_layout.setContentsMargins(0, 0, 0, 0)
         self.inp_code = QtWidgets.QLineEdit(); self.inp_code.setPlaceholderText("텔레그램 인증번호 5자리")
         self.btn_login = QtWidgets.QPushButton("로그인 승인")
-        self.btn_login.setObjectName("LoginBtn")
+        self.btn_login.setObjectName("ActionBtn")
         self.btn_login.clicked.connect(self.submit_auth_code)
         auth_layout.addWidget(self.inp_code); auth_layout.addWidget(self.btn_login)
         self.auth_widget.setVisible(False)
@@ -233,14 +239,33 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
 
         content_layout.addWidget(api_group)
 
-        # 3. 홍보방 리스트 섹션
-        link_group = QtWidgets.QGroupBox("2. 타겟 홍보방 링크 리스트 (엔터로 구분)")
+        # 2. 홍보방 리스트 관리 섹션
+        link_group = QtWidgets.QGroupBox("2. 타겟 홍보방 링크 리스트")
         link_layout = QtWidgets.QVBoxLayout(link_group)
-        self.inp_links = QtWidgets.QTextEdit()
-        link_layout.addWidget(self.inp_links)
+        
+        link_input_row = QtWidgets.QHBoxLayout()
+        self.inp_new_link = QtWidgets.QLineEdit()
+        self.inp_new_link.setPlaceholderText("https://t.me/...")
+        
+        self.btn_add_link = QtWidgets.QPushButton("추가")
+        self.btn_add_link.setObjectName("ActionBtn")
+        self.btn_add_link.clicked.connect(self.add_link)
+        
+        self.btn_del_link = QtWidgets.QPushButton("선택 삭제")
+        self.btn_del_link.setObjectName("DelBtn")
+        self.btn_del_link.clicked.connect(self.del_link)
+        
+        link_input_row.addWidget(self.inp_new_link)
+        link_input_row.addWidget(self.btn_add_link)
+        link_input_row.addWidget(self.btn_del_link)
+        
+        self.list_links = QtWidgets.QListWidget()
+        
+        link_layout.addLayout(link_input_row)
+        link_layout.addWidget(self.list_links)
         content_layout.addWidget(link_group)
 
-        # 4. 콘솔 로그 섹션 (기존 터미널 테마 적용)
+        # 3. 콘솔 로그 섹션
         log_group = QtWidgets.QGroupBox("💻 시스템 라이브 콘솔 로그")
         log_layout = QtWidgets.QVBoxLayout(log_group)
         self.log_view = QtWidgets.QTextEdit()
@@ -249,7 +274,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         log_layout.addWidget(self.log_view)
         content_layout.addWidget(log_group)
 
-        # 5. 하단 시작 버튼
+        # 4. 하단 시작 버튼
         self.btn_start = QtWidgets.QPushButton("▶ 홍보방 자동 인입 시작")
         self.btn_start.setObjectName("StartBtn")
         self.btn_start.setFixedHeight(50)
@@ -267,17 +292,37 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
                     self.inp_api_id.setText(data.get("api_id", ""))
                     self.inp_api_hash.setText(data.get("api_hash", ""))
                     self.inp_phone.setText(data.get("phone", ""))
-                    self.inp_links.setPlainText(data.get("links", ""))
+                    
+                    links = data.get("links", [])
+                    if isinstance(links, str): 
+                        links = links.split('\n')
+                    for link in links:
+                        if link.strip():
+                            self.list_links.addItem(link.strip())
             except: pass
 
     def save_config(self):
+        links = [self.list_links.item(i).text() for i in range(self.list_links.count())]
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump({
                 "api_id": self.inp_api_id.text(),
                 "api_hash": self.inp_api_hash.text(),
                 "phone": self.inp_phone.text(),
-                "links": self.inp_links.toPlainText()
+                "links": links
             }, f, indent=4)
+
+    def add_link(self):
+        link = self.inp_new_link.text().strip()
+        if link:
+            self.list_links.addItem(link)
+            self.inp_new_link.clear()
+            self.save_config()
+
+    def del_link(self):
+        current_row = self.list_links.currentRow()
+        if current_row >= 0:
+            self.list_links.takeItem(current_row)
+            self.save_config()
 
     def check_session(self):
         if os.path.exists(os.path.join(DATA_DIR, "joiner_session.session")):
@@ -293,6 +338,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         self.login_worker = LoginWorker(int(self.inp_api_id.text()), self.inp_api_hash.text(), self.inp_phone.text())
         self.login_worker.log_signal.connect(self.log)
         self.login_worker.auth_code_needed.connect(self.show_auth_input)
+        self.login_worker.password_needed.connect(self.prompt_2fa_password)
         self.login_worker.start()
 
     def show_auth_input(self, phone_code_hash):
@@ -307,17 +353,36 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         
         self.login_worker = LoginWorker(int(self.inp_api_id.text()), self.inp_api_hash.text(), self.inp_phone.text(), self.phone_code_hash, code)
         self.login_worker.log_signal.connect(self.log)
+        self.login_worker.password_needed.connect(self.prompt_2fa_password)
         self.login_worker.login_success.connect(self.on_login_success)
         self.login_worker.start()
+
+    def prompt_2fa_password(self):
+        pwd, ok = QtWidgets.QInputDialog.getText(self, "2단계 인증", "계정에 설정된 2단계 비밀번호를 입력하세요:", QtWidgets.QLineEdit.Password)
+        if ok and pwd:
+            self.log("🔐 2단계 비밀번호 입력됨. 승인을 시도합니다...")
+            self.login_worker = LoginWorker(int(self.inp_api_id.text()), self.inp_api_hash.text(), self.inp_phone.text(), password=pwd)
+            self.login_worker.log_signal.connect(self.log)
+            self.login_worker.login_success.connect(self.on_login_success)
+            self.login_worker.start()
+        else:
+            self.log("⚠️ 2단계 인증이 취소되었습니다. 로그인을 다시 시도해주세요.")
+            self.btn_login.setEnabled(True)
+            self.btn_send_code.setEnabled(True)
 
     def on_login_success(self):
         self.auth_widget.setVisible(False)
         self.btn_start.setEnabled(True)
         self.btn_login.setEnabled(True)
+        self.btn_send_code.setEnabled(True)
 
     def start_macro(self):
         self.save_config()
-        links = self.inp_links.toPlainText().split('\n')
+        links = [self.list_links.item(i).text() for i in range(self.list_links.count())]
+        
+        if not links:
+            return self.log("⚠️ 추가된 홍보방 링크가 없습니다.")
+            
         self.btn_start.setEnabled(False)
         self.btn_start.setText("⏳ 인입 작업 진행 중...")
         
