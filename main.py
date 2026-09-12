@@ -226,16 +226,19 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         row2.addWidget(self.inp_phone); row2.addWidget(self.btn_send_code)
         api_layout.addLayout(row2)
 
-        self.auth_widget = QtWidgets.QWidget()
-        auth_layout = QtWidgets.QHBoxLayout(self.auth_widget)
-        auth_layout.setContentsMargins(0, 0, 0, 0)
-        self.inp_code = QtWidgets.QLineEdit(); self.inp_code.setPlaceholderText("텔레그램 인증번호 5자리")
-        self.btn_login = QtWidgets.QPushButton("로그인 승인")
-        self.btn_login.setObjectName("ActionBtn")
-        self.btn_login.clicked.connect(self.submit_auth_code)
-        auth_layout.addWidget(self.inp_code); auth_layout.addWidget(self.btn_login)
-        self.auth_widget.setVisible(False)
-        api_layout.addWidget(self.auth_widget)
+        self.two_fa_widget = QtWidgets.QWidget()
+        two_fa_layout = QtWidgets.QHBoxLayout(self.two_fa_widget)
+        two_fa_layout.setContentsMargins(0, 0, 0, 0)
+        self.inp_password = QtWidgets.QLineEdit()
+        self.inp_password.setPlaceholderText("2단계 비밀번호 입력")
+        self.inp_password.setEchoMode(QtWidgets.QLineEdit.Password) # 비밀번호 별표 처리
+        self.btn_login_2fa = QtWidgets.QPushButton("비밀번호 승인")
+        self.btn_login_2fa.setObjectName("ActionBtn")
+        self.btn_login_2fa.clicked.connect(self.submit_2fa_password)
+        two_fa_layout.addWidget(self.inp_password)
+        two_fa_layout.addWidget(self.btn_login_2fa)
+        self.two_fa_widget.setVisible(False)
+        api_layout.addWidget(self.two_fa_widget)
 
         content_layout.addWidget(api_group)
 
@@ -342,7 +345,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         self.login_worker = LoginWorker(int(self.inp_api_id.text()), self.inp_api_hash.text(), self.inp_phone.text())
         self.login_worker.log_signal.connect(self.log)
         self.login_worker.auth_code_needed.connect(self.show_auth_input)
-        self.login_worker.password_needed.connect(self.prompt_2fa_password) # 2FA 연결
+        self.login_worker.password_needed.connect(self.show_2fa_input) # 변경됨
         self.login_worker.start()
 
     def show_auth_input(self, phone_code_hash):
@@ -357,28 +360,34 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         
         self.login_worker = LoginWorker(int(self.inp_api_id.text()), self.inp_api_hash.text(), self.inp_phone.text(), self.phone_code_hash, code)
         self.login_worker.log_signal.connect(self.log)
-        self.login_worker.password_needed.connect(self.prompt_2fa_password) # 2FA 연결
+        self.login_worker.password_needed.connect(self.show_2fa_input) # 변경됨
         self.login_worker.login_success.connect(self.on_login_success)
         self.login_worker.start()
 
-    # 신규: 2단계 인증 팝업 함수
-    def prompt_2fa_password(self):
-        pwd, ok = QtWidgets.QInputDialog.getText(self, "2단계 인증", "계정에 설정된 2단계 비밀번호를 입력하세요:", QtWidgets.QLineEdit.Password)
-        if ok and pwd:
-            self.log("🔐 2단계 비밀번호 입력됨. 승인을 시도합니다...")
-            self.login_worker = LoginWorker(int(self.inp_api_id.text()), self.inp_api_hash.text(), self.inp_phone.text(), password=pwd)
-            self.login_worker.log_signal.connect(self.log)
-            self.login_worker.login_success.connect(self.on_login_success)
-            self.login_worker.start()
-        else:
-            self.log("⚠️ 2단계 인증이 취소되었습니다. 로그인을 다시 시도해주세요.")
-            self.btn_login.setEnabled(True)
-            self.btn_send_code.setEnabled(True)
+    # 신규: 2단계 인증창 UI 노출
+    def show_2fa_input(self):
+        self.auth_widget.setVisible(False) # 기존 인증번호 창 숨김
+        self.two_fa_widget.setVisible(True) # 2단계 비밀번호 창 표시
+        self.btn_send_code.setEnabled(True)
+
+    # 신규: 2단계 비밀번호 제출 로직
+    def submit_2fa_password(self):
+        pwd = self.inp_password.text().strip()
+        if not pwd: return
+        self.btn_login_2fa.setEnabled(False)
+        
+        self.log("🔐 2단계 비밀번호 승인을 시도합니다...")
+        self.login_worker = LoginWorker(int(self.inp_api_id.text()), self.inp_api_hash.text(), self.inp_phone.text(), password=pwd)
+        self.login_worker.log_signal.connect(self.log)
+        self.login_worker.login_success.connect(self.on_login_success)
+        self.login_worker.start()
 
     def on_login_success(self):
         self.auth_widget.setVisible(False)
+        self.two_fa_widget.setVisible(False) # 로그인 성공 시 비밀번호 창도 숨김
         self.btn_start.setEnabled(True)
         self.btn_login.setEnabled(True)
+        self.btn_login_2fa.setEnabled(True)
         self.btn_send_code.setEnabled(True)
 
     def start_macro(self):
