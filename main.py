@@ -69,7 +69,7 @@ class CustomTitleBar(QtWidgets.QWidget):
 class LoginWorker(QThread):
     log_signal = pyqtSignal(str)
     auth_code_needed = pyqtSignal(str)
-    password_needed = pyqtSignal()
+    password_needed = pyqtSignal()  # 2차 비밀번호 요구 신호 추가
     login_success = pyqtSignal()
 
     def __init__(self, api_id, api_hash, phone, phone_code_hash=None, auth_code=None, password=None):
@@ -100,7 +100,7 @@ class LoginWorker(QThread):
                 self.login_success.emit()
         except SessionPasswordNeeded:
             self.log_signal.emit("🔒 2단계 인증(비밀번호)이 필요합니다.")
-            self.password_needed.emit()
+            self.password_needed.emit() # UI에 비밀번호 팝업 요청
         except Exception as e:
             self.log_signal.emit(f"❌ 로그인 실패: {e}")
         finally:
@@ -177,17 +177,17 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
             * { font-family: 'Pretendard', 'Malgun Gothic', 'Segoe UI', sans-serif; }
             QWidget#MainContainer { background-color: #0b0f19; border-radius: 16px; border: 1px solid #1e293b; }
             QLabel { color: #e2e8f0; font-size: 13px; font-weight: bold; }
+            /* 리스트 위젯 및 버튼 디자인 추가 (기존 CSS에 병합) */
             QLineEdit, QTextEdit, QListWidget { 
                 background-color: #1e293b; border: 2px solid #334155; border-radius: 8px; 
                 padding: 10px; color: #f8fafc; font-weight: bold; font-size: 13px; outline: none;
             }
-            QLineEdit:focus, QTextEdit:focus, QListWidget:focus { border: 2px solid #3b82f6; background-color: #0f172a; color: #60a5fa; }
             QListWidget::item { padding: 5px; border-bottom: 1px solid #334155; }
             QListWidget::item:selected { background-color: #2563eb; color: white; border-radius: 4px; }
-            QGroupBox { border: 2px solid #334155; border-radius: 12px; margin-top: 15px; padding-top: 15px; font-weight: bold; color: #94a3b8; background-color: #0f172a; }
-            QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 15px; top: 0px; background-color: #1e293b; padding: 2px 10px; color: #60a5fa; border-radius: 6px;}
-            QPushButton { background-color: #1e232d; color: #94a3b8; border: 1px solid #2d3748; border-radius: 8px; font-size: 13px; font-weight: bold; padding: 8px; }
-            QPushButton:hover { background-color: #2a3140; border: 1px solid #475569; color: #e2e8f0; }
+            QPushButton#ActionBtn { background-color: #1e232d; color: #60a5fa; border: 1px solid #2d3748; border-radius: 8px; font-size: 13px; font-weight: bold; }
+            QPushButton#ActionBtn:hover { background-color: #2a3140; border: 1px solid #3b82f6; color: #93c5fd; }
+            QPushButton#DelBtn { background-color: #2d1e23; color: #f87171; border: 1px solid #4a2d35; border-radius: 8px; font-size: 13px; font-weight: bold; }
+            QPushButton#DelBtn:hover { background-color: #3f2a31; border: 1px solid #ef4444; color: #fca5a5; }
             QPushButton#ActionBtn { background-color: #1e232d; color: #60a5fa; border: 1px solid #2d3748; border-radius: 8px; font-size: 13px; font-weight: bold; }
             QPushButton#ActionBtn:hover { background-color: #2a3140; border: 1px solid #3b82f6; color: #93c5fd; }
             QPushButton#DelBtn { background-color: #2d1e23; color: #f87171; border: 1px solid #4a2d35; border-radius: 8px; font-size: 13px; font-weight: bold; }
@@ -239,7 +239,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
 
         content_layout.addWidget(api_group)
 
-        # 2. 홍보방 리스트 관리 섹션
+        # 3. 홍보방 리스트 관리 섹션
         link_group = QtWidgets.QGroupBox("2. 타겟 홍보방 링크 리스트")
         link_layout = QtWidgets.QVBoxLayout(link_group)
         
@@ -293,6 +293,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
                     self.inp_api_hash.setText(data.get("api_hash", ""))
                     self.inp_phone.setText(data.get("phone", ""))
                     
+                    # 리스트 위젯에 항목 불러오기
                     links = data.get("links", [])
                     if isinstance(links, str): 
                         links = links.split('\n')
@@ -302,6 +303,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
             except: pass
 
     def save_config(self):
+        # 리스트 위젯의 항목들을 리스트로 저장
         links = [self.list_links.item(i).text() for i in range(self.list_links.count())]
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump({
@@ -311,6 +313,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
                 "links": links
             }, f, indent=4)
 
+    # 신규: 링크 추가 함수
     def add_link(self):
         link = self.inp_new_link.text().strip()
         if link:
@@ -318,6 +321,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
             self.inp_new_link.clear()
             self.save_config()
 
+    # 신규: 링크 삭제 함수
     def del_link(self):
         current_row = self.list_links.currentRow()
         if current_row >= 0:
@@ -338,7 +342,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         self.login_worker = LoginWorker(int(self.inp_api_id.text()), self.inp_api_hash.text(), self.inp_phone.text())
         self.login_worker.log_signal.connect(self.log)
         self.login_worker.auth_code_needed.connect(self.show_auth_input)
-        self.login_worker.password_needed.connect(self.prompt_2fa_password)
+        self.login_worker.password_needed.connect(self.prompt_2fa_password) # 2FA 연결
         self.login_worker.start()
 
     def show_auth_input(self, phone_code_hash):
@@ -353,10 +357,11 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         
         self.login_worker = LoginWorker(int(self.inp_api_id.text()), self.inp_api_hash.text(), self.inp_phone.text(), self.phone_code_hash, code)
         self.login_worker.log_signal.connect(self.log)
-        self.login_worker.password_needed.connect(self.prompt_2fa_password)
+        self.login_worker.password_needed.connect(self.prompt_2fa_password) # 2FA 연결
         self.login_worker.login_success.connect(self.on_login_success)
         self.login_worker.start()
 
+    # 신규: 2단계 인증 팝업 함수
     def prompt_2fa_password(self):
         pwd, ok = QtWidgets.QInputDialog.getText(self, "2단계 인증", "계정에 설정된 2단계 비밀번호를 입력하세요:", QtWidgets.QLineEdit.Password)
         if ok and pwd:
@@ -378,6 +383,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
 
     def start_macro(self):
         self.save_config()
+        # 리스트 위젯에서 링크들을 가져와 리스트업
         links = [self.list_links.item(i).text() for i in range(self.list_links.count())]
         
         if not links:
