@@ -69,7 +69,7 @@ class CustomTitleBar(QtWidgets.QWidget):
 class LoginWorker(QThread):
     log_signal = pyqtSignal(str)
     auth_code_needed = pyqtSignal(str)
-    password_needed = pyqtSignal()  # 2차 비밀번호 요구 신호 추가
+    password_needed = pyqtSignal()
     login_success = pyqtSignal()
 
     def __init__(self, api_id, api_hash, phone, phone_code_hash=None, auth_code=None, password=None):
@@ -77,7 +77,10 @@ class LoginWorker(QThread):
         self.api_id, self.api_hash, self.phone = api_id, api_hash, phone
         self.phone_code_hash, self.auth_code, self.password = phone_code_hash, auth_code, password
 
-    def run(self): asyncio.run(self.process_login())
+    def run(self): 
+        if sys.platform == 'win32':
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        asyncio.run(self.process_login())
 
     async def process_login(self):
         app = Client("joiner_session", api_id=self.api_id, api_hash=self.api_hash, workdir=DATA_DIR)
@@ -100,7 +103,7 @@ class LoginWorker(QThread):
                 self.login_success.emit()
         except SessionPasswordNeeded:
             self.log_signal.emit("🔒 2단계 인증(비밀번호)이 필요합니다.")
-            self.password_needed.emit() # UI에 비밀번호 팝업 요청
+            self.password_needed.emit()
         except Exception as e:
             self.log_signal.emit(f"❌ 로그인 실패: {e}")
         finally:
@@ -114,7 +117,10 @@ class JoinWorker(QThread):
         super().__init__()
         self.api_id, self.api_hash, self.links = api_id, api_hash, links
 
-    def run(self): asyncio.run(self.auto_join())
+    def run(self): 
+        if sys.platform == 'win32':
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        asyncio.run(self.auto_join())
 
     async def auto_join(self):
         app = Client("joiner_session", api_id=self.api_id, api_hash=self.api_hash, workdir=DATA_DIR)
@@ -177,17 +183,12 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
             * { font-family: 'Pretendard', 'Malgun Gothic', 'Segoe UI', sans-serif; }
             QWidget#MainContainer { background-color: #0b0f19; border-radius: 16px; border: 1px solid #1e293b; }
             QLabel { color: #e2e8f0; font-size: 13px; font-weight: bold; }
-            /* 리스트 위젯 및 버튼 디자인 추가 (기존 CSS에 병합) */
             QLineEdit, QTextEdit, QListWidget { 
                 background-color: #1e293b; border: 2px solid #334155; border-radius: 8px; 
                 padding: 10px; color: #f8fafc; font-weight: bold; font-size: 13px; outline: none;
             }
             QListWidget::item { padding: 5px; border-bottom: 1px solid #334155; }
             QListWidget::item:selected { background-color: #2563eb; color: white; border-radius: 4px; }
-            QPushButton#ActionBtn { background-color: #1e232d; color: #60a5fa; border: 1px solid #2d3748; border-radius: 8px; font-size: 13px; font-weight: bold; }
-            QPushButton#ActionBtn:hover { background-color: #2a3140; border: 1px solid #3b82f6; color: #93c5fd; }
-            QPushButton#DelBtn { background-color: #2d1e23; color: #f87171; border: 1px solid #4a2d35; border-radius: 8px; font-size: 13px; font-weight: bold; }
-            QPushButton#DelBtn:hover { background-color: #3f2a31; border: 1px solid #ef4444; color: #fca5a5; }
             QPushButton#ActionBtn { background-color: #1e232d; color: #60a5fa; border: 1px solid #2d3748; border-radius: 8px; font-size: 13px; font-weight: bold; }
             QPushButton#ActionBtn:hover { background-color: #2a3140; border: 1px solid #3b82f6; color: #93c5fd; }
             QPushButton#DelBtn { background-color: #2d1e23; color: #f87171; border: 1px solid #4a2d35; border-radius: 8px; font-size: 13px; font-weight: bold; }
@@ -226,12 +227,27 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         row2.addWidget(self.inp_phone); row2.addWidget(self.btn_send_code)
         api_layout.addLayout(row2)
 
+        # 🚨 [누락 수정] 텔레그램 인증번호 입력 위젯 생성 및 초기화
+        self.auth_widget = QtWidgets.QWidget()
+        auth_layout = QtWidgets.QHBoxLayout(self.auth_widget)
+        auth_layout.setContentsMargins(0, 0, 0, 0)
+        self.inp_code = QtWidgets.QLineEdit()
+        self.inp_code.setPlaceholderText("텔레그램 인증번호 5자리")
+        self.btn_login = QtWidgets.QPushButton("로그인 승인")
+        self.btn_login.setObjectName("ActionBtn")
+        self.btn_login.clicked.connect(self.submit_auth_code)
+        auth_layout.addWidget(self.inp_code)
+        auth_layout.addWidget(self.btn_login)
+        self.auth_widget.setVisible(False)
+        api_layout.addWidget(self.auth_widget)
+
+        # 2단계 인증 비밀번호 입력 위젯
         self.two_fa_widget = QtWidgets.QWidget()
         two_fa_layout = QtWidgets.QHBoxLayout(self.two_fa_widget)
         two_fa_layout.setContentsMargins(0, 0, 0, 0)
         self.inp_password = QtWidgets.QLineEdit()
         self.inp_password.setPlaceholderText("2단계 비밀번호 입력")
-        self.inp_password.setEchoMode(QtWidgets.QLineEdit.Password) # 비밀번호 별표 처리
+        self.inp_password.setEchoMode(QtWidgets.QLineEdit.Password)
         self.btn_login_2fa = QtWidgets.QPushButton("비밀번호 승인")
         self.btn_login_2fa.setObjectName("ActionBtn")
         self.btn_login_2fa.clicked.connect(self.submit_2fa_password)
@@ -242,7 +258,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
 
         content_layout.addWidget(api_group)
 
-        # 3. 홍보방 리스트 관리 섹션
+        # 2. 홍보방 리스트 관리 섹션
         link_group = QtWidgets.QGroupBox("2. 타겟 홍보방 링크 리스트")
         link_layout = QtWidgets.QVBoxLayout(link_group)
         
@@ -296,7 +312,6 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
                     self.inp_api_hash.setText(data.get("api_hash", ""))
                     self.inp_phone.setText(data.get("phone", ""))
                     
-                    # 리스트 위젯에 항목 불러오기
                     links = data.get("links", [])
                     if isinstance(links, str): 
                         links = links.split('\n')
@@ -306,7 +321,6 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
             except: pass
 
     def save_config(self):
-        # 리스트 위젯의 항목들을 리스트로 저장
         links = [self.list_links.item(i).text() for i in range(self.list_links.count())]
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump({
@@ -316,7 +330,6 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
                 "links": links
             }, f, indent=4)
 
-    # 신규: 링크 추가 함수
     def add_link(self):
         link = self.inp_new_link.text().strip()
         if link:
@@ -324,7 +337,6 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
             self.inp_new_link.clear()
             self.save_config()
 
-    # 신규: 링크 삭제 함수
     def del_link(self):
         current_row = self.list_links.currentRow()
         if current_row >= 0:
@@ -341,11 +353,16 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         if not all([self.inp_api_id.text(), self.inp_api_hash.text(), self.inp_phone.text()]):
             return self.log("⚠️ API ID, HASH, 전화번호를 모두 입력하세요.")
         
+        try:
+            safe_api_id = int(self.inp_api_id.text().strip())
+        except ValueError:
+            return self.log("⚠️ 오류: API ID는 숫자만 입력해야 합니다.")
+        
         self.btn_send_code.setEnabled(False)
-        self.login_worker = LoginWorker(int(self.inp_api_id.text()), self.inp_api_hash.text(), self.inp_phone.text())
+        self.login_worker = LoginWorker(safe_api_id, self.inp_api_hash.text().strip(), self.inp_phone.text().strip())
         self.login_worker.log_signal.connect(self.log)
         self.login_worker.auth_code_needed.connect(self.show_auth_input)
-        self.login_worker.password_needed.connect(self.show_2fa_input) # 변경됨
+        self.login_worker.password_needed.connect(self.show_2fa_input)
         self.login_worker.start()
 
     def show_auth_input(self, phone_code_hash):
@@ -356,35 +373,45 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
     def submit_auth_code(self):
         code = self.inp_code.text().strip()
         if not code: return
+        
+        try:
+            safe_api_id = int(self.inp_api_id.text().strip())
+        except ValueError:
+            return self.log("⚠️ 오류: API ID는 숫자만 입력해야 합니다.")
+
         self.btn_login.setEnabled(False)
         
-        self.login_worker = LoginWorker(int(self.inp_api_id.text()), self.inp_api_hash.text(), self.inp_phone.text(), self.phone_code_hash, code)
+        self.login_worker = LoginWorker(safe_api_id, self.inp_api_hash.text().strip(), self.inp_phone.text().strip(), self.phone_code_hash, code)
         self.login_worker.log_signal.connect(self.log)
-        self.login_worker.password_needed.connect(self.show_2fa_input) # 변경됨
+        self.login_worker.password_needed.connect(self.show_2fa_input)
         self.login_worker.login_success.connect(self.on_login_success)
         self.login_worker.start()
 
-    # 신규: 2단계 인증창 UI 노출
     def show_2fa_input(self):
-        self.auth_widget.setVisible(False) # 기존 인증번호 창 숨김
-        self.two_fa_widget.setVisible(True) # 2단계 비밀번호 창 표시
+        self.auth_widget.setVisible(False)
+        self.two_fa_widget.setVisible(True)
         self.btn_send_code.setEnabled(True)
 
-    # 신규: 2단계 비밀번호 제출 로직
     def submit_2fa_password(self):
         pwd = self.inp_password.text().strip()
         if not pwd: return
+        
+        try:
+            safe_api_id = int(self.inp_api_id.text().strip())
+        except ValueError:
+            return self.log("⚠️ 오류: API ID는 숫자만 입력해야 합니다.")
+
         self.btn_login_2fa.setEnabled(False)
         
         self.log("🔐 2단계 비밀번호 승인을 시도합니다...")
-        self.login_worker = LoginWorker(int(self.inp_api_id.text()), self.inp_api_hash.text(), self.inp_phone.text(), password=pwd)
+        self.login_worker = LoginWorker(safe_api_id, self.inp_api_hash.text().strip(), self.inp_phone.text().strip(), password=pwd)
         self.login_worker.log_signal.connect(self.log)
         self.login_worker.login_success.connect(self.on_login_success)
         self.login_worker.start()
 
     def on_login_success(self):
         self.auth_widget.setVisible(False)
-        self.two_fa_widget.setVisible(False) # 로그인 성공 시 비밀번호 창도 숨김
+        self.two_fa_widget.setVisible(False)
         self.btn_start.setEnabled(True)
         self.btn_login.setEnabled(True)
         self.btn_login_2fa.setEnabled(True)
@@ -392,16 +419,20 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
 
     def start_macro(self):
         self.save_config()
-        # 리스트 위젯에서 링크들을 가져와 리스트업
         links = [self.list_links.item(i).text() for i in range(self.list_links.count())]
         
         if not links:
             return self.log("⚠️ 추가된 홍보방 링크가 없습니다.")
             
+        try:
+            safe_api_id = int(self.inp_api_id.text().strip())
+        except ValueError:
+            return self.log("⚠️ 오류: API ID는 숫자만 입력해야 합니다.")
+            
         self.btn_start.setEnabled(False)
         self.btn_start.setText("⏳ 인입 작업 진행 중...")
         
-        self.join_worker = JoinWorker(int(self.inp_api_id.text()), self.inp_api_hash.text(), links)
+        self.join_worker = JoinWorker(safe_api_id, self.inp_api_hash.text().strip(), links)
         self.join_worker.log_signal.connect(self.log)
         self.join_worker.finished_signal.connect(self.on_macro_finished)
         self.join_worker.start()
