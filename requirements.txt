@@ -1,0 +1,1 @@
+pip install pyinstaller==6.3.0 hydrogram tgcrypto PyQt5 requests
