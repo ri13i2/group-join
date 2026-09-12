@@ -4,7 +4,7 @@ import json
 import asyncio
 import random
 from PyQt5 import QtWidgets, QtCore, QtGui
-from PyQt5.QtCore import QProcess, Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from hydrogram import Client
 from hydrogram.errors import FloodWait, SessionPasswordNeeded
 
@@ -64,7 +64,7 @@ class CustomTitleBar(QtWidgets.QWidget):
         self.drag_offset = None
 
 # ==========================================
-# ⚙️ 2. 텔레그램 백그라운드 워커 (로그인/인입)
+# ⚙️ 2. 텔레그램 백그라운드 워커 (단계별 로그인 분기)
 # ==========================================
 class LoginWorker(QThread):
     log_signal = pyqtSignal(str)
@@ -86,21 +86,32 @@ class LoginWorker(QThread):
         app = Client("joiner_session", api_id=self.api_id, api_hash=self.api_hash, workdir=DATA_DIR)
         await app.connect()
         try:
+            # 케이스 1: 2단계 인증 비밀번호 검증 단계
             if self.password:
-                self.log_signal.emit("2단계 인증 비밀번호 확인 중...")
+                self.log_signal.emit("🔐 2단계 인증 비밀번호 확인 중...")
                 await app.check_password(self.password)
-                self.log_signal.emit("✅ 2단계 인증 및 로그인 성공! 세션이 유지됩니다.")
+                self.log_signal.emit("✅ 2단계 인증 및 로그인 최종 성공! 세션이 안전하게 저장됩니다.")
                 self.login_success.emit()
+            
+            # 케이스 2: 최초 전화번호 입력 후 인증번호 발송 요청 단계
             elif not self.auth_code:
                 self.log_signal.emit("텔레그램 서버로 인증번호 발송 요청 중...")
                 sent = await app.send_code(self.phone)
-                self.log_signal.emit("✅ 인증번호 발송 완료! 앱을 확인해주세요.")
+                self.log_signal.emit("✅ 인증번호 발송 완료! 텔레그램 공식 앱을 확인해주세요.")
                 self.auth_code_needed.emit(sent.phone_code_hash)
+            
+            # 케이스 3: 발송된 인증번호를 받아 sign_in을 시도하는 단계
             else:
-                self.log_signal.emit("로그인 승인 진행 중...")
-                await app.sign_in(self.phone, self.phone_code_hash, self.auth_code)
-                self.log_signal.emit("✅ 로그인 성공! 이제 세션이 유지됩니다.")
-                self.login_success.emit()
+                self.log_signal.emit("인증번호 확인 및 로그인 시도 중...")
+                try:
+                    await app.sign_in(self.phone, self.phone_code_hash, self.auth_code)
+                    self.log_signal.emit("✅ 로그인 성공! 세션이 유지됩니다.")
+                    self.login_success.emit()
+                except SessionPasswordNeeded:
+                    # 인증번호는 맞았으나 계정에 2단계 보안 설정이 걸려있는 경우 발생
+                    self.log_signal.emit("🔒 이 계정은 2단계 인증(비밀번호)이 설정되어 있습니다.")
+                    self.password_needed.emit()
+                    
         except SessionPasswordNeeded:
             self.log_signal.emit("🔒 2단계 인증(비밀번호)이 필요합니다.")
             self.password_needed.emit()
@@ -210,7 +221,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         content_layout.setSpacing(15)
 
         # 1. API 로그인 섹션
-        api_group = QtWidgets.QGroupBox("1. API 및 계정 연동 (세션 유지됨)")
+        api_group = QtWidgets.QGroupBox("1. API 및 계정 연동 (단계별 인증)")
         api_layout = QtWidgets.QVBoxLayout(api_group)
         
         row1 = QtWidgets.QHBoxLayout()
@@ -227,13 +238,13 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         row2.addWidget(self.inp_phone); row2.addWidget(self.btn_send_code)
         api_layout.addLayout(row2)
 
-        # 🚨 [누락 수정] 텔레그램 인증번호 입력 위젯 생성 및 초기화
+        # 텔레그램 인증번호 입력 위젯
         self.auth_widget = QtWidgets.QWidget()
         auth_layout = QtWidgets.QHBoxLayout(self.auth_widget)
         auth_layout.setContentsMargins(0, 0, 0, 0)
         self.inp_code = QtWidgets.QLineEdit()
         self.inp_code.setPlaceholderText("텔레그램 인증번호 5자리")
-        self.btn_login = QtWidgets.QPushButton("로그인 승인")
+        self.btn_login = QtWidgets.QPushButton("인증번호 확인")
         self.btn_login.setObjectName("ActionBtn")
         self.btn_login.clicked.connect(self.submit_auth_code)
         auth_layout.addWidget(self.inp_code)
@@ -368,6 +379,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
     def show_auth_input(self, phone_code_hash):
         self.phone_code_hash = phone_code_hash
         self.auth_widget.setVisible(True)
+        self.two_fa_widget.setVisible(False)
         self.btn_send_code.setEnabled(True)
 
     def submit_auth_code(self):
@@ -381,6 +393,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
 
         self.btn_login.setEnabled(False)
         
+        # 인증번호를 받아 sign_in 시도 (2단계 비밀번호가 걸려있다면 여기서 에러를 감지하고 2FA 입력창으로 분기)
         self.login_worker = LoginWorker(safe_api_id, self.inp_api_hash.text().strip(), self.inp_phone.text().strip(), self.phone_code_hash, code)
         self.login_worker.log_signal.connect(self.log)
         self.login_worker.password_needed.connect(self.show_2fa_input)
@@ -390,6 +403,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
     def show_2fa_input(self):
         self.auth_widget.setVisible(False)
         self.two_fa_widget.setVisible(True)
+        self.btn_login.setEnabled(True)
         self.btn_send_code.setEnabled(True)
 
     def submit_2fa_password(self):
@@ -403,7 +417,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
 
         self.btn_login_2fa.setEnabled(False)
         
-        self.log("🔐 2단계 비밀번호 승인을 시도합니다...")
+        # 2단계 인증 비밀번호 검증 실행
         self.login_worker = LoginWorker(safe_api_id, self.inp_api_hash.text().strip(), self.inp_phone.text().strip(), password=pwd)
         self.login_worker.log_signal.connect(self.log)
         self.login_worker.login_success.connect(self.on_login_success)
