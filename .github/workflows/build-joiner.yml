@@ -1,0 +1,50 @@
+name: Build Telegram Auto Joiner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.8"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller hydrogram tgcrypto PyQt5
+
+      # =========================
+      # 🔹 텔레그램 자동 인입기 빌드 (단일 실행파일)
+      # =========================
+      - name: Build Auto Joiner
+        shell: powershell
+        run: |
+          pyinstaller `
+            --onefile `
+            --clean `
+            --windowed `
+            --noupx `
+            --name "Nova_Auto_Joiner" `
+            --hidden-import hydrogram `
+            --hidden-import tgcrypto `
+            auto_joiner.py
+
+      # (선택) 아이콘을 적용하고 싶다면 pyinstaller 명령어 마지막에 아래 줄을 추가하세요.
+      # --icon=icon.ico `
+
+      # =========================
+      # 🔹 결과 업로드 (완성된 exe 파일 추출)
+      # =========================
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nova_Auto_Joiner_EXE
+          path: dist/
