@@ -146,7 +146,6 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         self.setCentralWidget(self.central_widget)
         self.central_widget.setObjectName("MainContainer")
         
-        # 제공해주신 VIP 대시보드 테마 CSS 완벽 이식
         self.central_widget.setStyleSheet("""
             * { font-family: 'Pretendard', 'Malgun Gothic', 'Segoe UI', sans-serif; }
             QWidget#MainContainer { background-color: #0b0f19; border-radius: 16px; border: 1px solid #1e293b; }
@@ -187,6 +186,9 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
             
             QPushButton#DelBtn { background-color: #2d1e23; color: #f87171; border: 1px solid #4a2d35; border-radius: 8px; font-size: 13px; font-weight: bold; }
             QPushButton#DelBtn:hover { background-color: #3f2a31; border: 1px solid #ef4444; color: #fca5a5; }
+
+            QPushButton#LoadTxtBtn { background-color: #1e3a8a; color: #bfdbfe; border: 1px solid #1e40af; border-radius: 8px; font-size: 13px; font-weight: bold; }
+            QPushButton#LoadTxtBtn:hover { background-color: #1e40af; border: 1px solid #3b82f6; color: #ffffff; }
         """)
 
         main_layout = QtWidgets.QVBoxLayout(self.central_widget)
@@ -239,17 +241,25 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         
         self.btn_add_link = QtWidgets.QPushButton("추가")
         self.btn_add_link.setFixedHeight(40)
-        self.btn_add_link.setFixedWidth(80)
+        self.btn_add_link.setFixedWidth(60)
         self.btn_add_link.clicked.connect(self.add_link)
+
+        # 🌟 메모장 불러오기 버튼 추가
+        self.btn_load_txt = QtWidgets.QPushButton("TXT 불러오기")
+        self.btn_load_txt.setObjectName("LoadTxtBtn")
+        self.btn_load_txt.setFixedHeight(40)
+        self.btn_load_txt.setFixedWidth(100)
+        self.btn_load_txt.clicked.connect(self.load_txt_file)
         
         self.btn_del_link = QtWidgets.QPushButton("선택 삭제")
         self.btn_del_link.setObjectName("DelBtn")
         self.btn_del_link.setFixedHeight(40)
-        self.btn_del_link.setFixedWidth(90)
+        self.btn_del_link.setFixedWidth(80)
         self.btn_del_link.clicked.connect(self.del_link)
         
         link_input_row.addWidget(self.inp_new_link)
         link_input_row.addWidget(self.btn_add_link)
+        link_input_row.addWidget(self.btn_load_txt) # 레이아웃에 통합
         link_input_row.addWidget(self.btn_del_link)
         link_layout.addLayout(link_input_row)
         
@@ -264,7 +274,6 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         
         self.log_view = QtWidgets.QTextEdit()
         self.log_view.setReadOnly(True)
-        # 터미널 느낌의 로그 뷰 디자인
         self.log_view.setStyleSheet("background-color: #090d16; color: #38bdf8; font-family: 'Consolas', monospace; font-size: 12px; border: 1px solid #1f2937; border-radius: 8px; padding: 10px;")
         log_layout.addWidget(self.log_view)
         content_layout.addWidget(log_group)
@@ -280,7 +289,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         main_layout.addLayout(content_layout)
 
     # ----------------------------------------
-    # 데이터 로드 / 세이브
+    # 데이터 로드 / 세이브 / 텍스트 불러오기
     # ----------------------------------------
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
@@ -311,15 +320,58 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
     def add_link(self):
         link = self.inp_new_link.text().strip()
         if link:
-            self.list_links.addItem(link)
-            self.inp_new_link.clear()
-            self.save_config()
+            # 중복 체크 후 추가
+            existing_links = [self.list_links.item(i).text() for i in range(self.list_links.count())]
+            if link not in existing_links:
+                self.list_links.addItem(link)
+                self.inp_new_link.clear()
+                self.save_config()
+            else:
+                QtWidgets.QMessageBox.warning(self, "중복", "이미 리스트에 존재하는 링크입니다.")
 
     def del_link(self):
         current_row = self.list_links.currentRow()
         if current_row >= 0:
             self.list_links.takeItem(current_row)
             self.save_config()
+
+    # 🌟 신규 기능: 메모장 텍스트 파일 불러오기 로직
+    def load_txt_file(self):
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "메모장 파일 불러오기", "", "Text Files (*.txt);;All Files (*)")
+        if not file_path:
+            return
+        
+        try:
+            # 기본 UTF-8 시도
+            with open(file_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+        except UnicodeDecodeError:
+            try:
+                # 한국어 윈도우 메모장 인코딩(CP949) 대응
+                with open(file_path, 'r', encoding='cp949') as f:
+                    lines = f.readlines()
+            except Exception as e:
+                return QtWidgets.QMessageBox.critical(self, "파일 읽기 실패", f"파일을 읽는 중 오류가 발생했습니다:\n{str(e)}")
+        except Exception as e:
+            return QtWidgets.QMessageBox.critical(self, "파일 읽기 실패", f"파일을 읽는 중 오류가 발생했습니다:\n{str(e)}")
+
+        added_count = 0
+        existing_links = [self.list_links.item(i).text() for i in range(self.list_links.count())]
+
+        for line in lines:
+            link = line.strip()
+            # 빈 줄 통과 및 중복 추가 방지
+            if link and link not in existing_links:
+                self.list_links.addItem(link)
+                existing_links.append(link)
+                added_count += 1
+        
+        if added_count > 0:
+            self.save_config()
+            self.log(f"📁 텍스트 파일에서 {added_count}개의 링크를 성공적으로 불러왔습니다.")
+            QtWidgets.QMessageBox.information(self, "불러오기 완료", f"총 {added_count}개의 링크가 성공적으로 추가되었습니다.")
+        else:
+            QtWidgets.QMessageBox.warning(self, "불러오기 결과", "추가할 새로운 링크가 없거나 파일이 비어있습니다.")
 
     def check_session(self):
         if os.path.exists(os.path.join(DATA_DIR, "joiner_session.session")):
@@ -379,7 +431,6 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         QtWidgets.QApplication.processEvents()
 
         try:
-            # VIP 대시보드에서 사용한 asyncio.run 방식 그대로 적용
             asyncio.run(self.perform_full_login(phone, api_id, api_hash))
             QtWidgets.QMessageBox.information(self, "로그인 성공", "계정 연동이 완벽하게 완료되었습니다!")
             self.log("✅ 로그인 성공! 이제 세션이 유지되며 인입 시작이 가능합니다.")
