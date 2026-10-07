@@ -74,7 +74,7 @@ class CustomTitleBar(QtWidgets.QWidget):
         self.drag_offset = None
 
 # ==========================================
-# ⚙️ 2. 자동 인입 백그라운드 워커
+# ⚙️ 2. 자동 인입 백그라운드 워커 (수정됨)
 # ==========================================
 class JoinWorker(QThread):
     log_signal = pyqtSignal(str)
@@ -85,6 +85,17 @@ class JoinWorker(QThread):
         self.api_id = api_id
         self.api_hash = api_hash
         self.links = links
+        self._is_running = True # 🛑 중단 플래그 추가
+
+    def stop(self):
+        self._is_running = False
+
+    async def cancellable_sleep(self, delay):
+        """대기 중에도 즉시 중단할 수 있도록 0.1초 단위로 쪼개어 슬립"""
+        for _ in range(int(delay * 10)):
+            if not self._is_running:
+                break
+            await asyncio.sleep(0.1)
 
     def run(self): 
         if sys.platform == 'win32':
@@ -97,29 +108,40 @@ class JoinWorker(QThread):
         
         async with app:
             for link in self.links:
+                if not self._is_running:
+                    self.log_signal.emit("🛑 사용자에 의해 작업이 중단되었습니다.")
+                    break
+
                 link = link.strip()
                 if not link: continue
                 
+                # 🌟 [수정된 부분] 공개 주소 / 비공개 주소 자동 판별
+                target_chat = link
+                if "t.me/" in target_chat and "+" not in target_chat and "joinchat" not in target_chat:
+                    target_chat = target_chat.split("t.me/")[-1].strip()
+                    target_chat = target_chat.split("/")[0].split("?")[0]
+                
                 joined = False
-                while not joined:
+                while not joined and self._is_running:
                     try:
                         self.log_signal.emit(f"▶ 입장 시도 중: {link}")
-                        await app.join_chat(link)
+                        await app.join_chat(target_chat) # 변환된 target_chat 사용
                         self.log_signal.emit(f"✅ 입장 완료: {link}")
                         joined = True
                         
                         delay = random.uniform(15, 35)
                         self.log_signal.emit(f"휴식: {int(delay)}초 대기...")
-                        await asyncio.sleep(delay)
+                        await self.cancellable_sleep(delay)
 
                     except FloodWait as e:
                         wait_time = e.value
                         self.log_signal.emit(f"🚨 [플러드 웨이트] 서버 제한 조치로 {wait_time}초 대기합니다.")
-                        await asyncio.sleep(wait_time)
+                        await self.cancellable_sleep(wait_time)
+                        if not self._is_running: break
                         
                         extra_delay = random.uniform(180, 300)
                         self.log_signal.emit(f"🛡️ [계정 보호] 추가로 {int(extra_delay)}초 대기합니다...")
-                        await asyncio.sleep(extra_delay)
+                        await self.cancellable_sleep(extra_delay)
                         
                     except Exception as e:
                         self.log_signal.emit(f"❌ 입장 실패 ({link}): {e}")
@@ -128,7 +150,7 @@ class JoinWorker(QThread):
         self.finished_signal.emit()
 
 # ==========================================
-# 🚀 3. 메인 대시보드 UI
+# 🚀 3. 메인 대시보드 UI (수정됨)
 # ==========================================
 class AutoJoinerApp(QtWidgets.QMainWindow):
     def __init__(self):
@@ -174,7 +196,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
             }
             QPushButton:hover { background-color: #2a3140; border: 1px solid #475569; color: #e2e8f0; }
             QPushButton:pressed { background-color: #1a1e27; padding-top: 10px; padding-bottom: 6px; }
-            QPushButton:disabled { background-color: #0f172a; color: #475569; border: 1px solid #1e293b; }
+            QPushButton:disabled { background-color: #0f172a; color: #334155; border: 1px solid #1e293b; }
             
             QPushButton#LoginBtn { background-color: #1e232d; color: #60a5fa; border: 1px solid #2d3748; border-radius: 10px; font-size: 15px; font-weight: bold; }
             QPushButton#LoginBtn:hover { background-color: #2a3140; border: 1px solid #3b82f6; color: #93c5fd; }
@@ -183,6 +205,12 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
             QPushButton#StartBtn { background-color: #172a22; color: #4ade80; border: 1px solid #204a31; border-radius: 10px; font-size: 16px; font-weight: bold; letter-spacing: 1px; }
             QPushButton#StartBtn:hover { background-color: #1e3b2e; border: 1px solid #22c55e; color: #86efac; }
             QPushButton#StartBtn:pressed { background-color: #111f18; padding-top: 2px; }
+            QPushButton#StartBtn:disabled { background-color: #0f172a; color: #334155; border: 1px solid #1e293b; }
+
+            QPushButton#StopBtn { background-color: #2d1e23; color: #f87171; border: 1px solid #4a2d35; border-radius: 10px; font-size: 16px; font-weight: bold; letter-spacing: 1px; }
+            QPushButton#StopBtn:hover { background-color: #3f2a31; border: 1px solid #ef4444; color: #fca5a5; }
+            QPushButton#StopBtn:pressed { background-color: #1a1e27; padding-top: 2px; }
+            QPushButton#StopBtn:disabled { background-color: #0f172a; color: #334155; border: 1px solid #1e293b; }
             
             QPushButton#DelBtn { background-color: #2d1e23; color: #f87171; border: 1px solid #4a2d35; border-radius: 8px; font-size: 13px; font-weight: bold; }
             QPushButton#DelBtn:hover { background-color: #3f2a31; border: 1px solid #ef4444; color: #fca5a5; }
@@ -244,7 +272,6 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         self.btn_add_link.setFixedWidth(60)
         self.btn_add_link.clicked.connect(self.add_link)
 
-        # 🌟 메모장 불러오기 버튼 추가
         self.btn_load_txt = QtWidgets.QPushButton("TXT 불러오기")
         self.btn_load_txt.setObjectName("LoadTxtBtn")
         self.btn_load_txt.setFixedHeight(40)
@@ -259,7 +286,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         
         link_input_row.addWidget(self.inp_new_link)
         link_input_row.addWidget(self.btn_add_link)
-        link_input_row.addWidget(self.btn_load_txt) # 레이아웃에 통합
+        link_input_row.addWidget(self.btn_load_txt)
         link_input_row.addWidget(self.btn_del_link)
         link_layout.addLayout(link_input_row)
         
@@ -278,14 +305,26 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         log_layout.addWidget(self.log_view)
         content_layout.addWidget(log_group)
 
-        # --- 4. 하단 컨트롤 버튼 ---
+        # 🌟 --- 4. 하단 컨트롤 버튼 (시작 / 중단 분할) ---
+        bottom_layout = QtWidgets.QHBoxLayout()
+        bottom_layout.setSpacing(10)
+
         self.btn_start = QtWidgets.QPushButton("▶ 홍보방 자동 인입 시작")
         self.btn_start.setObjectName("StartBtn")
         self.btn_start.setFixedHeight(55)
         self.btn_start.setEnabled(False)
         self.btn_start.clicked.connect(self.start_macro)
-        content_layout.addWidget(self.btn_start)
 
+        self.btn_stop = QtWidgets.QPushButton("⏹ 인입 중단")
+        self.btn_stop.setObjectName("StopBtn")
+        self.btn_stop.setFixedHeight(55)
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.clicked.connect(self.stop_macro)
+
+        bottom_layout.addWidget(self.btn_start)
+        bottom_layout.addWidget(self.btn_stop)
+        
+        content_layout.addLayout(bottom_layout)
         main_layout.addLayout(content_layout)
 
     # ----------------------------------------
@@ -320,7 +359,6 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
     def add_link(self):
         link = self.inp_new_link.text().strip()
         if link:
-            # 중복 체크 후 추가
             existing_links = [self.list_links.item(i).text() for i in range(self.list_links.count())]
             if link not in existing_links:
                 self.list_links.addItem(link)
@@ -335,19 +373,16 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
             self.list_links.takeItem(current_row)
             self.save_config()
 
-    # 🌟 신규 기능: 메모장 텍스트 파일 불러오기 로직
     def load_txt_file(self):
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "메모장 파일 불러오기", "", "Text Files (*.txt);;All Files (*)")
         if not file_path:
             return
         
         try:
-            # 기본 UTF-8 시도
             with open(file_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
         except UnicodeDecodeError:
             try:
-                # 한국어 윈도우 메모장 인코딩(CP949) 대응
                 with open(file_path, 'r', encoding='cp949') as f:
                     lines = f.readlines()
             except Exception as e:
@@ -360,7 +395,6 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
 
         for line in lines:
             link = line.strip()
-            # 빈 줄 통과 및 중복 추가 방지
             if link and link not in existing_links:
                 self.list_links.addItem(link)
                 existing_links.append(link)
@@ -383,7 +417,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
 
     # ----------------------------------------
-    # 제공해주신 VIP 대시보드 다이얼로그 로그인 로직 완벽 이식
+    # 다이얼로그 로그인 로직
     # ----------------------------------------
     async def perform_full_login(self, phone, api_id, api_hash):
         app = Client("joiner_session", api_id=api_id, api_hash=api_hash, workdir=DATA_DIR)
@@ -392,7 +426,6 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
             self.log("텔레그램 서버로 인증번호 발송 요청 중...")
             sent = await app.send_code(phone)
             
-            # 1단계: 인증번호 다이얼로그
             code, ok = QtWidgets.QInputDialog.getText(self, "인증번호 입력", f"{phone} 계정으로 전송된\n숫자 인증번호를 입력하세요:")
             if not ok or not code.strip(): 
                 raise ValueError("인증번호 입력이 취소되었습니다.")
@@ -401,7 +434,6 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
                 self.log("로그인 승인 진행 중...")
                 await app.sign_in(phone, sent.phone_code_hash, code.strip())
             except SessionPasswordNeeded:
-                # 2단계: 2차 암호 다이얼로그
                 self.log("🔒 2단계 인증(비밀번호)이 감지되었습니다.")
                 pwd, ok = QtWidgets.QInputDialog.getText(self, "2단계 인증 필요", "해당 계정은 2단계 보안이 설정되어 있습니다.\n텔레그램 암호를 입력해주세요:", QtWidgets.QLineEdit.Password)
                 if not ok or not pwd.strip(): 
@@ -443,7 +475,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
             self.btn_login.setEnabled(True)
 
     # ----------------------------------------
-    # 자동 인입기 작동
+    # 자동 인입기 작동 및 중단 제어 (수정됨)
     # ----------------------------------------
     def start_macro(self):
         self.save_config()
@@ -457,8 +489,10 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         except ValueError:
             return QtWidgets.QMessageBox.warning(self, "경고", "API ID 설정이 올바르지 않습니다.")
             
+        # 버튼 상태 변경
         self.btn_start.setEnabled(False)
         self.btn_start.setText("⏳ 인입 작업 진행 중...")
+        self.btn_stop.setEnabled(True)
         
         # 백그라운드 워커 실행
         self.join_worker = JoinWorker(api_id, self.inp_api_hash.text().strip(), links)
@@ -466,10 +500,20 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         self.join_worker.finished_signal.connect(self.on_macro_finished)
         self.join_worker.start()
 
+    def stop_macro(self):
+        if hasattr(self, 'join_worker') and self.join_worker.isRunning():
+            self.log("⚠️ 중단 신호 전송 완료... 현재 작업을 안전하게 종료하는 중입니다.")
+            self.btn_stop.setEnabled(False)
+            self.btn_stop.setText("종료 대기 중...")
+            self.join_worker.stop()
+
     def on_macro_finished(self):
-        self.log("✅ 모든 방 인입 스크립트가 종료되었습니다.")
+        self.log("✅ 인입 스크립트가 안전하게 종료되었습니다.")
+        # 버튼 상태 복구
         self.btn_start.setEnabled(True)
         self.btn_start.setText("▶ 홍보방 자동 인입 시작")
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.setText("⏹ 인입 중단")
 
 if __name__ == "__main__":
     QtWidgets.QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
