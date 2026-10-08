@@ -6,7 +6,8 @@ import random
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from hydrogram import Client
-from hydrogram.errors import FloodWait, SessionPasswordNeeded
+# 🌟 [수정됨] UserAlreadyParticipant 예외 처리 클래스 추가 임포트
+from hydrogram.errors import FloodWait, SessionPasswordNeeded, UserAlreadyParticipant
 
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -74,7 +75,7 @@ class CustomTitleBar(QtWidgets.QWidget):
         self.drag_offset = None
 
 # ==========================================
-# ⚙️ 2. 자동 인입 백그라운드 워커 (수정됨)
+# ⚙️ 2. 자동 인입 백그라운드 워커 (스킵 로직 추가됨)
 # ==========================================
 class JoinWorker(QThread):
     log_signal = pyqtSignal(str)
@@ -85,13 +86,12 @@ class JoinWorker(QThread):
         self.api_id = api_id
         self.api_hash = api_hash
         self.links = links
-        self._is_running = True # 🛑 중단 플래그 추가
+        self._is_running = True 
 
     def stop(self):
         self._is_running = False
 
     async def cancellable_sleep(self, delay):
-        """대기 중에도 즉시 중단할 수 있도록 0.1초 단위로 쪼개어 슬립"""
         for _ in range(int(delay * 10)):
             if not self._is_running:
                 break
@@ -115,23 +115,40 @@ class JoinWorker(QThread):
                 link = link.strip()
                 if not link: continue
                 
-                # 🌟 [수정된 부분] 공개 주소 / 비공개 주소 자동 판별
                 target_chat = link
+                is_public = False
+                
+                # 공개 주소 추출
                 if "t.me/" in target_chat and "+" not in target_chat and "joinchat" not in target_chat:
                     target_chat = target_chat.split("t.me/")[-1].strip()
                     target_chat = target_chat.split("/")[0].split("?")[0]
+                    is_public = True
+                
+                # 🌟 [신규 추가] 공개방의 경우 이미 입장되어 있는지 선제 확인 (딜레이 없이 스킵)
+                if is_public:
+                    try:
+                        await app.get_chat_member(target_chat, "me")
+                        self.log_signal.emit(f"⏩ 이미 입장된 방입니다 (스킵): {link}")
+                        continue # 아래의 가입 및 대기 로직을 건너뛰고 바로 다음 링크로 이동
+                    except Exception:
+                        pass # 입장되어 있지 않으면 정상적으로 진행
                 
                 joined = False
                 while not joined and self._is_running:
                     try:
                         self.log_signal.emit(f"▶ 입장 시도 중: {link}")
-                        await app.join_chat(target_chat) # 변환된 target_chat 사용
+                        await app.join_chat(target_chat) 
                         self.log_signal.emit(f"✅ 입장 완료: {link}")
                         joined = True
                         
                         delay = random.uniform(15, 35)
                         self.log_signal.emit(f"휴식: {int(delay)}초 대기...")
                         await self.cancellable_sleep(delay)
+
+                    # 🌟 [신규 추가] 비공개 링크 등에서 이미 입장된 경우를 서버가 반환할 때 스킵
+                    except UserAlreadyParticipant:
+                        self.log_signal.emit(f"⏩ 이미 입장된 방입니다 (스킵): {link}")
+                        break # 대기 시간 없이 즉시 while 문 탈출 후 다음 링크로 이동
 
                     except FloodWait as e:
                         wait_time = e.value
@@ -150,7 +167,7 @@ class JoinWorker(QThread):
         self.finished_signal.emit()
 
 # ==========================================
-# 🚀 3. 메인 대시보드 UI (수정됨)
+# 🚀 3. 메인 대시보드 UI
 # ==========================================
 class AutoJoinerApp(QtWidgets.QMainWindow):
     def __init__(self):
@@ -305,7 +322,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         log_layout.addWidget(self.log_view)
         content_layout.addWidget(log_group)
 
-        # 🌟 --- 4. 하단 컨트롤 버튼 (시작 / 중단 분할) ---
+        # --- 4. 하단 컨트롤 버튼 (시작 / 중단 분할) ---
         bottom_layout = QtWidgets.QHBoxLayout()
         bottom_layout.setSpacing(10)
 
@@ -475,7 +492,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
             self.btn_login.setEnabled(True)
 
     # ----------------------------------------
-    # 자동 인입기 작동 및 중단 제어 (수정됨)
+    # 자동 인입기 작동 및 중단 제어
     # ----------------------------------------
     def start_macro(self):
         self.save_config()
@@ -489,12 +506,10 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         except ValueError:
             return QtWidgets.QMessageBox.warning(self, "경고", "API ID 설정이 올바르지 않습니다.")
             
-        # 버튼 상태 변경
         self.btn_start.setEnabled(False)
         self.btn_start.setText("⏳ 인입 작업 진행 중...")
         self.btn_stop.setEnabled(True)
         
-        # 백그라운드 워커 실행
         self.join_worker = JoinWorker(api_id, self.inp_api_hash.text().strip(), links)
         self.join_worker.log_signal.connect(self.log)
         self.join_worker.finished_signal.connect(self.on_macro_finished)
@@ -509,7 +524,6 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
 
     def on_macro_finished(self):
         self.log("✅ 인입 스크립트가 안전하게 종료되었습니다.")
-        # 버튼 상태 복구
         self.btn_start.setEnabled(True)
         self.btn_start.setText("▶ 홍보방 자동 인입 시작")
         self.btn_stop.setEnabled(False)
