@@ -169,7 +169,7 @@ class JoinWorker(QThread):
                         await self.cancellable_sleep(wait_time)
                         if not self._is_running: break
                         
-                        extra_delay = random.uniform(180, 300)
+                        extra_delay = random.uniform(60, 120)
                         self.log_signal.emit(f"🛡️ [계정 보호] 추가로 {int(extra_delay)}초 대기합니다...")
                         await self.cancellable_sleep(extra_delay)
                         
