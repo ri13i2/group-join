@@ -74,7 +74,7 @@ class CustomTitleBar(QtWidgets.QWidget):
         self.drag_offset = None
 
 # ==========================================
-# ⚙️ 2. 자동 인입 백그라운드 워커 (초고속 스킵 로직 적용)
+# ⚙️ 2. 자동 인입 백그라운드 워커 (캐싱 최적화 + 진행률 표기)
 # ==========================================
 class JoinWorker(QThread):
     log_signal = pyqtSignal(str)
@@ -106,7 +106,6 @@ class JoinWorker(QThread):
         self.log_signal.emit("\n🚀 자동 인입 매크로 가동 시작...")
         
         async with app:
-            # 🌟 [핵심 로직] 시작 시 현재 계정이 속한 모든 방을 한 번에 캐싱 (API 호출 최소화)
             self.log_signal.emit("🔍 [최적화] 기존 가입 방 목록을 분석 중입니다... (잠시만 대기)")
             joined_public_chats = set()
             try:
@@ -118,13 +117,19 @@ class JoinWorker(QThread):
             except Exception as e:
                 self.log_signal.emit(f"⚠️ 방 목록 동기화 중 일부 오류 발생 (무시하고 인입 진행): {e}")
 
-            for link in self.links:
+            total_links = len(self.links)
+            
+            # 🌟 [신규] enumerate를 사용하여 현재 진행 중인 순서(idx) 트래킹
+            for idx, link in enumerate(self.links, 1):
                 if not self._is_running:
                     self.log_signal.emit("🛑 사용자에 의해 작업이 중단되었습니다.")
                     break
 
                 link = link.strip()
                 if not link: continue
+                
+                # 진행 상황 실시간 출력
+                self.log_signal.emit(f"\n📊 [진행 상황] 총 {total_links}방 중 {idx}번째 방 진행 중...")
                 
                 target_chat = link
                 is_public = False
@@ -134,10 +139,9 @@ class JoinWorker(QThread):
                     target_chat = target_chat.split("/")[0].split("?")[0]
                     is_public = True
                 
-                # 🌟 [신규 스킵 로직] 서버에 묻지 않고 캐시 메모리에서 즉시 검사
                 if is_public and target_chat.lower() in joined_public_chats:
                     self.log_signal.emit(f"⚡ [초고속 스킵] 이미 가입된 방: {link}")
-                    continue # 서버 통신을 아예 안 하므로 딜레이 불필요, 플러드웨이 발생 확률 0%
+                    continue 
                 
                 joined = False
                 while not joined and self._is_running:
@@ -146,7 +150,6 @@ class JoinWorker(QThread):
                         await app.join_chat(target_chat) 
                         self.log_signal.emit(f"✅ 입장 완료: {link}")
                         
-                        # 방금 가입한 방도 캐시에 추가하여 혹시 중복된 링크가 있을 때 바로 스킵되도록 처리
                         if is_public:
                             joined_public_chats.add(target_chat.lower())
                             
@@ -157,9 +160,7 @@ class JoinWorker(QThread):
                         await self.cancellable_sleep(delay)
 
                     except UserAlreadyParticipant:
-                        # 비공개 링크(+hash)의 경우 아이디 캐싱이 불가능하므로 서버 반환 에러로 판별
                         self.log_signal.emit(f"⏩ [비공개 스킵] 이미 입장된 방입니다: {link}")
-                        # 비공개 링크 스킵 시에만 서버 보호를 위해 최소한의 짧은 휴식(2초) 부여
                         await self.cancellable_sleep(random.uniform(2, 4))
                         break 
 
