@@ -6,7 +6,6 @@ import random
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from hydrogram import Client
-# 🌟 [수정됨] UserAlreadyParticipant 예외 처리 클래스 추가 임포트
 from hydrogram.errors import FloodWait, SessionPasswordNeeded, UserAlreadyParticipant
 
 if sys.platform == 'win32':
@@ -75,7 +74,7 @@ class CustomTitleBar(QtWidgets.QWidget):
         self.drag_offset = None
 
 # ==========================================
-# ⚙️ 2. 자동 인입 백그라운드 워커 (스킵 로직 추가됨)
+# ⚙️ 2. 자동 인입 백그라운드 워커 (초고속 스킵 로직 적용)
 # ==========================================
 class JoinWorker(QThread):
     log_signal = pyqtSignal(str)
@@ -107,6 +106,18 @@ class JoinWorker(QThread):
         self.log_signal.emit("\n🚀 자동 인입 매크로 가동 시작...")
         
         async with app:
+            # 🌟 [핵심 로직] 시작 시 현재 계정이 속한 모든 방을 한 번에 캐싱 (API 호출 최소화)
+            self.log_signal.emit("🔍 [최적화] 기존 가입 방 목록을 분석 중입니다... (잠시만 대기)")
+            joined_public_chats = set()
+            try:
+                async for dialog in app.get_dialogs():
+                    if not self._is_running: break
+                    if dialog.chat and dialog.chat.username:
+                        joined_public_chats.add(dialog.chat.username.lower())
+                self.log_signal.emit(f"💡 총 {len(joined_public_chats)}개의 방 목록 캐싱 완료! (이 방들은 서버 통신 없이 0초 즉시 스킵됩니다.)")
+            except Exception as e:
+                self.log_signal.emit(f"⚠️ 방 목록 동기화 중 일부 오류 발생 (무시하고 인입 진행): {e}")
+
             for link in self.links:
                 if not self._is_running:
                     self.log_signal.emit("🛑 사용자에 의해 작업이 중단되었습니다.")
@@ -118,20 +129,15 @@ class JoinWorker(QThread):
                 target_chat = link
                 is_public = False
                 
-                # 공개 주소 추출
                 if "t.me/" in target_chat and "+" not in target_chat and "joinchat" not in target_chat:
                     target_chat = target_chat.split("t.me/")[-1].strip()
                     target_chat = target_chat.split("/")[0].split("?")[0]
                     is_public = True
                 
-                # 🌟 [신규 추가] 공개방의 경우 이미 입장되어 있는지 선제 확인 (딜레이 없이 스킵)
-                if is_public:
-                    try:
-                        await app.get_chat_member(target_chat, "me")
-                        self.log_signal.emit(f"⏩ 이미 입장된 방입니다 (스킵): {link}")
-                        continue # 아래의 가입 및 대기 로직을 건너뛰고 바로 다음 링크로 이동
-                    except Exception:
-                        pass # 입장되어 있지 않으면 정상적으로 진행
+                # 🌟 [신규 스킵 로직] 서버에 묻지 않고 캐시 메모리에서 즉시 검사
+                if is_public and target_chat.lower() in joined_public_chats:
+                    self.log_signal.emit(f"⚡ [초고속 스킵] 이미 가입된 방: {link}")
+                    continue # 서버 통신을 아예 안 하므로 딜레이 불필요, 플러드웨이 발생 확률 0%
                 
                 joined = False
                 while not joined and self._is_running:
@@ -139,16 +145,23 @@ class JoinWorker(QThread):
                         self.log_signal.emit(f"▶ 입장 시도 중: {link}")
                         await app.join_chat(target_chat) 
                         self.log_signal.emit(f"✅ 입장 완료: {link}")
+                        
+                        # 방금 가입한 방도 캐시에 추가하여 혹시 중복된 링크가 있을 때 바로 스킵되도록 처리
+                        if is_public:
+                            joined_public_chats.add(target_chat.lower())
+                            
                         joined = True
                         
                         delay = random.uniform(15, 35)
                         self.log_signal.emit(f"휴식: {int(delay)}초 대기...")
                         await self.cancellable_sleep(delay)
 
-                    # 🌟 [신규 추가] 비공개 링크 등에서 이미 입장된 경우를 서버가 반환할 때 스킵
                     except UserAlreadyParticipant:
-                        self.log_signal.emit(f"⏩ 이미 입장된 방입니다 (스킵): {link}")
-                        break # 대기 시간 없이 즉시 while 문 탈출 후 다음 링크로 이동
+                        # 비공개 링크(+hash)의 경우 아이디 캐싱이 불가능하므로 서버 반환 에러로 판별
+                        self.log_signal.emit(f"⏩ [비공개 스킵] 이미 입장된 방입니다: {link}")
+                        # 비공개 링크 스킵 시에만 서버 보호를 위해 최소한의 짧은 휴식(2초) 부여
+                        await self.cancellable_sleep(random.uniform(2, 4))
+                        break 
 
                     except FloodWait as e:
                         wait_time = e.value
@@ -322,7 +335,7 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
         log_layout.addWidget(self.log_view)
         content_layout.addWidget(log_group)
 
-        # --- 4. 하단 컨트롤 버튼 (시작 / 중단 분할) ---
+        # --- 4. 하단 컨트롤 버튼 ---
         bottom_layout = QtWidgets.QHBoxLayout()
         bottom_layout.setSpacing(10)
 
