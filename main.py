@@ -3,6 +3,7 @@ import os
 import json
 import asyncio
 import random
+from datetime import datetime
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from hydrogram import Client
@@ -74,7 +75,7 @@ class CustomTitleBar(QtWidgets.QWidget):
         self.drag_offset = None
 
 # ==========================================
-# ⚙️ 2. 자동 인입 백그라운드 워커 (캐싱 최적화 + 진행률 표기)
+# ⚙️ 2. 자동 인입 백그라운드 워커 
 # ==========================================
 class JoinWorker(QThread):
     log_signal = pyqtSignal(str)
@@ -113,13 +114,12 @@ class JoinWorker(QThread):
                     if not self._is_running: break
                     if dialog.chat and dialog.chat.username:
                         joined_public_chats.add(dialog.chat.username.lower())
-                self.log_signal.emit(f"💡 총 {len(joined_public_chats)}개의 방 목록 캐싱 완료! (이 방들은 서버 통신 없이 0초 즉시 스킵됩니다.)")
+                self.log_signal.emit(f"💡 총 {len(joined_public_chats)}개의 방 목록 캐싱 완료! (서버 통신 없이 즉시 스킵 가능)")
             except Exception as e:
-                self.log_signal.emit(f"⚠️ 방 목록 동기화 중 일부 오류 발생 (무시하고 인입 진행): {e}")
+                self.log_signal.emit(f"⚠️ 방 목록 동기화 중 오류 발생 (무시하고 인입 진행): {e}")
 
             total_links = len(self.links)
             
-            # 🌟 [신규] enumerate를 사용하여 현재 진행 중인 순서(idx) 트래킹
             for idx, link in enumerate(self.links, 1):
                 if not self._is_running:
                     self.log_signal.emit("🛑 사용자에 의해 작업이 중단되었습니다.")
@@ -128,7 +128,6 @@ class JoinWorker(QThread):
                 link = link.strip()
                 if not link: continue
                 
-                # 진행 상황 실시간 출력
                 self.log_signal.emit(f"\n📊 [진행 상황] 총 {total_links}방 중 {idx}번째 방 진행 중...")
                 
                 target_chat = link
@@ -443,8 +442,18 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
             self.log("✅ 기존 로그인 세션이 발견되었습니다. 바로 인입 시작이 가능합니다.")
             self.btn_start.setEnabled(True)
 
+    # 🌟 [수정됨] 시간 표기(Time Stamp) 로직 추가
     def log(self, text):
-        self.log_view.append(text)
+        time_str = datetime.now().strftime("%H:%M:%S")
+        
+        # 줄바꿈(\n)이 포함된 텍스트는 줄바꿈 후에 시간이 찍히도록 정리
+        if text.startswith("\n"):
+            clean_text = text.lstrip('\n')
+            formatted_text = f"\n[{time_str}] {clean_text}"
+        else:
+            formatted_text = f"[{time_str}] {text}"
+            
+        self.log_view.append(formatted_text)
         self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
 
     # ----------------------------------------
