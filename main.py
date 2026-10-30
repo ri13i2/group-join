@@ -103,8 +103,8 @@ class JoinWorker(QThread):
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         asyncio.run(self.auto_join())
 
-    # 🌟 봇 인증 처리 비동기 헬퍼 함수
-    async def handle_bot_verification(self, app: Client, target_chat):
+    # 🌟 봇 인증 처리 비동기 헬퍼 함수 (내 계정 멘션 타겟팅 추가)
+    async def handle_bot_verification(self, app: Client, target_chat, me):
         self.log_signal.emit(f"⏳ [{target_chat}] 봇 인증 메시지 대기 중 (최대 10초)...")
         
         loop = asyncio.get_running_loop()
@@ -113,6 +113,24 @@ class JoinWorker(QThread):
         async def temp_message_handler(client, message):
             if message.chat.username and message.chat.username.lower() == target_chat.lower():
                 if message.reply_markup and isinstance(message.reply_markup, InlineKeyboardMarkup):
+                    text = message.text or message.caption or ""
+                    
+                    # 🎯 타겟 검증 로직: 봇 메시지가 '나'를 향한 것인지 확인
+                    is_for_me = False
+                    
+                    if getattr(message, 'mentioned', False):  # 텔레그램 API상 공식 멘션 판정
+                        is_for_me = True
+                    elif me.username and f"@{me.username.lower()}" in text.lower(): # @유저네임 멘션
+                        is_for_me = True
+                    elif me.first_name and me.first_name in text: # 이름(First Name) 호명
+                        is_for_me = True
+                    elif str(me.id) in text: # 고유 ID 포함
+                        is_for_me = True
+                        
+                    # 다른 사람의 인증 메시지라면 무시하고 패스
+                    if not is_for_me:
+                        return
+
                     if not bot_msg_future.done():
                         bot_msg_future.set_result(message)
 
@@ -120,18 +138,15 @@ class JoinWorker(QThread):
 
         try:
             msg = await asyncio.wait_for(bot_msg_future, timeout=10.0)
-            self.log_signal.emit(f"🤖 [{target_chat}] 인증 봇 버튼 감지됨, 처리 시작...")
+            self.log_signal.emit(f"🤖 [{target_chat}] 내 계정을 멘션한 인증 봇 감지됨, 처리 시작...")
             
             channel_url = None
-            
-            # 1. 인라인 버튼 중 채널 구독(URL) 링크 찾기
             for row in msg.reply_markup.inline_keyboard:
                 for button in row:
                     if button.url:
                         channel_url = button.url
                         break
             
-            # 2. 채널 구독 절차 진행
             if channel_url:
                 self.log_signal.emit(f"🔗 선행 구독 채널 발견, 입장 시도: {channel_url}")
                 try:
@@ -143,18 +158,16 @@ class JoinWorker(QThread):
                         await app.join_chat(channel_name)
                     self.log_signal.emit(f"✅ 선행 채널 구독 완료")
                 except UserAlreadyParticipant:
-                    self.log_signal.emit(f"⏩ 이미 구독된 선행 채널입니다.")
+                    pass
                 except Exception as e:
                     self.log_signal.emit(f"⚠️ 선행 채널 구독 실패: {e}")
 
                 await self.cancellable_sleep(random.uniform(2.5, 4.5))
             
-            # 3. 콜백(확인/완료) 버튼 클릭 처리
             for row in msg.reply_markup.inline_keyboard:
                 for button in row:
                     if not button.url and button.callback_data: 
                         self.log_signal.emit(f"👆 [{target_chat}] 최종 확인(콜백) 버튼 클릭 중...")
-                        # Hydrogram 콜백 데이터 전송 방식
                         await app.request_callback_answer(
                             chat_id=msg.chat.id,
                             message_id=msg.id,
@@ -164,7 +177,7 @@ class JoinWorker(QThread):
                         return
 
         except asyncio.TimeoutError:
-            self.log_signal.emit(f"⏩ [{target_chat}] 10초 내 봇 버튼 없음, 일반 방 간주 후 패스")
+            self.log_signal.emit(f"⏩ [{target_chat}] 10초 내 내 계정 인증 메시지 없음, 정상 방 간주")
         except Exception as e:
             self.log_signal.emit(f"❌ [{target_chat}] 봇 인증 오류: {e}")
         finally:
@@ -175,6 +188,10 @@ class JoinWorker(QThread):
         self.log_signal.emit("\n🚀 자동 인입 매크로 가동 시작...")
         
         async with app:
+            # 🌟 시작 시점에 내 텔레그램 계정 정보(이름, 유저네임, ID)를 미리 로드
+            me = await app.get_me()
+            self.log_signal.emit(f"👤 내 계정 인식 완료: {me.first_name} (ID: {me.id})")
+
             self.log_signal.emit("🔍 [최적화] 기존 가입 방 목록을 분석 중입니다... (잠시만 대기)")
             joined_public_chats = set()
             try:
@@ -182,9 +199,9 @@ class JoinWorker(QThread):
                     if not self._is_running: break
                     if dialog.chat and dialog.chat.username:
                         joined_public_chats.add(dialog.chat.username.lower())
-                self.log_signal.emit(f"💡 총 {len(joined_public_chats)}개의 방 목록 캐싱 완료! (서버 통신 없이 즉시 스킵 가능)")
+                self.log_signal.emit(f"💡 총 {len(joined_public_chats)}개의 방 목록 캐싱 완료!")
             except Exception as e:
-                self.log_signal.emit(f"⚠️ 방 목록 동기화 중 오류 발생 (무시하고 인입 진행): {e}")
+                self.log_signal.emit(f"⚠️ 방 목록 동기화 중 오류 발생: {e}")
 
             total_links = len(self.links)
             
@@ -222,9 +239,9 @@ class JoinWorker(QThread):
                             
                         joined = True
                         
-                        # 🌟 방 입장 직후 봇 인증 대기 로직 수행 (public 그룹 한정)
+                        # 🌟 봇 인증 처리 함수에 내 계정 정보(me) 전달
                         if is_public:
-                            await self.handle_bot_verification(app, target_chat)
+                            await self.handle_bot_verification(app, target_chat, me)
                         
                         delay = random.uniform(15, 35)
                         self.log_signal.emit(f"휴식: {int(delay)}초 대기...")
