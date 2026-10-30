@@ -6,8 +6,9 @@ import random
 from datetime import datetime
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from hydrogram import Client
+from hydrogram import Client, filters
 from hydrogram.errors import FloodWait, SessionPasswordNeeded, UserAlreadyParticipant
+from hydrogram.types import InlineKeyboardMarkup
 
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -102,6 +103,73 @@ class JoinWorker(QThread):
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         asyncio.run(self.auto_join())
 
+    # 🌟 봇 인증 처리 비동기 헬퍼 함수
+    async def handle_bot_verification(self, app: Client, target_chat):
+        self.log_signal.emit(f"⏳ [{target_chat}] 봇 인증 메시지 대기 중 (최대 10초)...")
+        
+        loop = asyncio.get_running_loop()
+        bot_msg_future = loop.create_future()
+
+        async def temp_message_handler(client, message):
+            if message.chat.username and message.chat.username.lower() == target_chat.lower():
+                if message.reply_markup and isinstance(message.reply_markup, InlineKeyboardMarkup):
+                    if not bot_msg_future.done():
+                        bot_msg_future.set_result(message)
+
+        handler = app.add_handler(filters.chat(target_chat), temp_message_handler)
+
+        try:
+            msg = await asyncio.wait_for(bot_msg_future, timeout=10.0)
+            self.log_signal.emit(f"🤖 [{target_chat}] 인증 봇 버튼 감지됨, 처리 시작...")
+            
+            channel_url = None
+            
+            # 1. 인라인 버튼 중 채널 구독(URL) 링크 찾기
+            for row in msg.reply_markup.inline_keyboard:
+                for button in row:
+                    if button.url:
+                        channel_url = button.url
+                        break
+            
+            # 2. 채널 구독 절차 진행
+            if channel_url:
+                self.log_signal.emit(f"🔗 선행 구독 채널 발견, 입장 시도: {channel_url}")
+                try:
+                    if '+' in channel_url or 'joinchat' in channel_url:
+                        invite_hash = channel_url.split('+')[-1].split('/')[-1]
+                        await app.join_chat(invite_hash) 
+                    else:
+                        channel_name = channel_url.split('/')[-1]
+                        await app.join_chat(channel_name)
+                    self.log_signal.emit(f"✅ 선행 채널 구독 완료")
+                except UserAlreadyParticipant:
+                    self.log_signal.emit(f"⏩ 이미 구독된 선행 채널입니다.")
+                except Exception as e:
+                    self.log_signal.emit(f"⚠️ 선행 채널 구독 실패: {e}")
+
+                await self.cancellable_sleep(random.uniform(2.5, 4.5))
+            
+            # 3. 콜백(확인/완료) 버튼 클릭 처리
+            for row in msg.reply_markup.inline_keyboard:
+                for button in row:
+                    if not button.url and button.callback_data: 
+                        self.log_signal.emit(f"👆 [{target_chat}] 최종 확인(콜백) 버튼 클릭 중...")
+                        # Hydrogram 콜백 데이터 전송 방식
+                        await app.request_callback_answer(
+                            chat_id=msg.chat.id,
+                            message_id=msg.id,
+                            callback_data=button.callback_data
+                        )
+                        self.log_signal.emit(f"✅ [{target_chat}] 인증 버튼 클릭 완료!")
+                        return
+
+        except asyncio.TimeoutError:
+            self.log_signal.emit(f"⏩ [{target_chat}] 10초 내 봇 버튼 없음, 일반 방 간주 후 패스")
+        except Exception as e:
+            self.log_signal.emit(f"❌ [{target_chat}] 봇 인증 오류: {e}")
+        finally:
+            app.remove_handler(handler)
+
     async def auto_join(self):
         app = Client("joiner_session", api_id=self.api_id, api_hash=self.api_hash, workdir=DATA_DIR)
         self.log_signal.emit("\n🚀 자동 인입 매크로 가동 시작...")
@@ -153,6 +221,10 @@ class JoinWorker(QThread):
                             joined_public_chats.add(target_chat.lower())
                             
                         joined = True
+                        
+                        # 🌟 방 입장 직후 봇 인증 대기 로직 수행 (public 그룹 한정)
+                        if is_public:
+                            await self.handle_bot_verification(app, target_chat)
                         
                         delay = random.uniform(15, 35)
                         self.log_signal.emit(f"휴식: {int(delay)}초 대기...")
@@ -442,11 +514,9 @@ class AutoJoinerApp(QtWidgets.QMainWindow):
             self.log("✅ 기존 로그인 세션이 발견되었습니다. 바로 인입 시작이 가능합니다.")
             self.btn_start.setEnabled(True)
 
-    # 🌟 [수정됨] 시간 표기(Time Stamp) 로직 추가
     def log(self, text):
         time_str = datetime.now().strftime("%H:%M:%S")
         
-        # 줄바꿈(\n)이 포함된 텍스트는 줄바꿈 후에 시간이 찍히도록 정리
         if text.startswith("\n"):
             clean_text = text.lstrip('\n')
             formatted_text = f"\n[{time_str}] {clean_text}"
