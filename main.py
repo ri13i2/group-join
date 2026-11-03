@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from datetime import datetime
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from hydrogram import Client, filters
+from hydrogram import Client, filters, raw
 from hydrogram.handlers import MessageHandler, EditedMessageHandler
 from hydrogram.errors import FloodWait, SessionPasswordNeeded, UserAlreadyParticipant
 from hydrogram.types import InlineKeyboardMarkup
@@ -314,9 +314,25 @@ class JoinWorker(QThread):
             if signature not in completed_steps:
                 try:
                     self.log_signal.emit(f"👆 [{msg.chat.id}] '{label}' 버튼 누르는 중...")
-                    response = await app.request_callback_answer(
-                        chat_id=msg.chat.id, message_id=msg.id,
-                        callback_data=raw_data, timeout=10
+                    # Hydrogram 일부 버전의 request_callback_answer()는
+                    # 내부에서 retries=0을 넘겨 API 요청 전 즉시 실패할 수 있음.
+                    # 명시적으로 retries=1을 전달하여 Telegram 콜백을 딱 한 번 보냅니다.
+                    # 재전송은 bot이 앞선 호출을 처리했을 가능성 때문에 자동으로 하지 않습니다.
+                    callback_bytes = (raw_data.encode('utf-8')
+                                      if isinstance(raw_data, str) else raw_data)
+                    if not isinstance(callback_bytes, bytes):
+                        raise TypeError('콜백 데이터 형식이 유효하지 않습니다.')
+                    peer = await app.resolve_peer(msg.chat.id)
+                    self.log_signal.emit(
+                        f"📡 [{msg.chat.id}] Telegram 콜백 API 전송 (메시지 {msg.id}, "
+                        f"데이터 {len(callback_bytes)} bytes, 1회 시도)"
+                    )
+                    response = await app.invoke(
+                        raw.functions.messages.GetBotCallbackAnswer(
+                            peer=peer, msg_id=msg.id, data=callback_bytes
+                        ),
+                        retries=1,
+                        timeout=10,
                     )
                     completed_steps.add(signature)
                     acted = True
@@ -326,7 +342,11 @@ class JoinWorker(QThread):
                     else:
                         self.log_signal.emit(f"✅ [{msg.chat.id}] '{label}' 콜백 요청 전송됨 (인증 최종 성공은 별도 확인 필요)")
                 except Exception as e:
-                    self.log_signal.emit(f"⚠️ [{msg.chat.id}] '{label}' 버튼 실패: {type(e).__name__}: {e}")
+                    self.log_signal.emit(f"⚠️ [{msg.chat.id}] '{label}' 콜백 응답 오류: {type(e).__name__}: {e}")
+                    self.log_signal.emit(
+                        f"ℹ️ [{msg.chat.id}] 응답 실패가 반드시 클릭 미처리를 뜻하진 않습니다. "
+                        "중복 클릭 없이 채금 상태를 확인하세요."
+                    )
                     if isinstance(e, FloodWait):
                         return acted, True
         return acted, True
@@ -386,7 +406,7 @@ class JoinWorker(QThread):
         if actions:
             self.log_signal.emit(f"✅ [{chat_id}] 인증 관련 조작 {actions}회 수행. 최종 가입 권한은 직접/추가 검증 필요")
         else:
-            self.log_signal.emit(f"ℹ️ [{chat_id}] 본인 대상 인증 조작 없음 (미존재/미감지/수동 인증 필요 가능)")
+            self.log_signal.emit(f"ℹ️ [{chat_id}] 성공 응답을 받은 인증 동작 없음 (미감지/콜백 실패/수동 확인 필요 가능)")
 
     async def join_and_verify(self, app, target, me):
         # 반드시 join_chat 실행 전에 핸들러를 등록합니다.
