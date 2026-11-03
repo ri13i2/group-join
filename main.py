@@ -3,10 +3,15 @@ import os
 import json
 import asyncio
 import random
+import re
+import time
+from collections import deque
+from urllib.parse import urlsplit
 from datetime import datetime
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from hydrogram import Client, filters
+from hydrogram.handlers import MessageHandler, EditedMessageHandler
 from hydrogram.errors import FloodWait, SessionPasswordNeeded, UserAlreadyParticipant
 from hydrogram.types import InlineKeyboardMarkup
 
@@ -82,191 +87,396 @@ class JoinWorker(QThread):
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal()
 
+    # 신규 인증 메시지는 이 시간 동안 탐색합니다. 전체 3분 제한과는 다르게,
+    # 인증 문구가 *도착하는 시점*을 기다리는 시간입니다.
+    INITIAL_VERIFY_WAIT = 40.0
+    FOLLOWUP_VERIFY_WAIT = 12.0
+    MAX_VERIFY_WINDOW = 180.0
+
+    # 본인 계정 지정이 없는 일반 인증 메시지를 자동으로 누르지 않습니다.
+    # 다른 신규 입장자의 버튼을 누르는 사고를 방지하기 위한 설정입니다.
+    REQUIRE_PERSONAL_TARGET = True
+
+    VERIFY_TERMS = ("인증", "확인", "입장", "참여", "구독", "가입", "버튼", "verify", "verification", "join")
+    VERIFY_BUTTONS = ("인증", "확인", "완료", "입장", "참여", "통과", "시작", "verify", "check", "confirm", "continue", "start")
+    CHANNEL_BUTTONS = ("채널", "구독", "가입", "join", "subscribe")
+    DANGEROUS_BUTTONS = ("취소", "거절", "탈퇴", "나가기", "차단", "신고", "cancel", "reject", "leave", "report")
+
     def __init__(self, api_id, api_hash, links):
         super().__init__()
         self.api_id = api_id
         self.api_hash = api_hash
         self.links = links
-        self._is_running = True 
+        self._is_running = True
 
     def stop(self):
         self._is_running = False
 
     async def cancellable_sleep(self, delay):
-        for _ in range(int(delay * 10)):
+        end_time = time.monotonic() + max(0, delay)
+        while self._is_running and time.monotonic() < end_time:
+            await asyncio.sleep(min(0.2, max(0.0, end_time - time.monotonic())))
+
+    def run(self):
+        try:
+            if sys.platform == 'win32':
+                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+            asyncio.run(self.auto_join())
+        except Exception as e:
+            self.log_signal.emit(f"❌ 작업 스레드 오류: {type(e).__name__}: {e}")
+        finally:
+            self.finished_signal.emit()
+
+    @staticmethod
+    def normalize_link(link):
+        link = link.strip()
+        if link.startswith('@'):
+            return link[1:], True
+        if not link.startswith(('https://', 'http://')) and 't.me/' in link:
+            link = 'https://' + link
+        if link.startswith(('https://', 'http://')):
+            parsed = urlsplit(link)
+            if parsed.hostname not in ('t.me', 'telegram.me', 'www.t.me'):
+                raise ValueError("지원하지 않는 그룹 링크 도메인입니다.")
+            path = parsed.path.strip('/')
+            if not path:
+                raise ValueError("그룹 링크가 비어 있습니다.")
+            if path.startswith('+') or path.startswith('joinchat/'):
+                return link, False  # 비공개 링크는 잘라내지 않고 그대로 사용
+            if '/' not in path and path not in ('c', 's'):
+                return path, True
+            raise ValueError(f"그룹 링크의 형식을 인식하지 못했습니다: {link}")
+        if re.fullmatch(r'[a-zA-Z][a-zA-Z0-9_]{4,31}', link):
+            return link, True
+        raise ValueError(f"지원하지 않는 링크 형식입니다: {link}")
+
+    @staticmethod
+    def _is_recent(message, joined_at):
+        # UTC datetime 혹은 timestamp를 비교합니다. 입장 직전부터의 메시지만 탐색합니다.
+        msg_date = getattr(message, 'date', None)
+        edit_date = getattr(message, 'edit_date', None)
+        timestamps = []
+        for dt in (msg_date, edit_date):
+            if dt is None:
+                continue
+            try:
+                # Hydrogram의 naive date는 UTC로 취급
+                from datetime import timezone
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                timestamps.append(dt.timestamp())
+            except (AttributeError, ValueError, TypeError):
+                pass
+        return bool(timestamps) and max(timestamps) >= joined_at - 3.0
+
+    @staticmethod
+    def _is_for_me(msg, me):
+        if getattr(msg, 'mentioned', False):
+            return True
+        text = str(getattr(msg, 'text', None) or getattr(msg, 'caption', None) or '')
+        username = getattr(me, 'username', None)
+        if username and re.search(r'(?<!\w)@' + re.escape(username) + r'(?!\w)', text, flags=re.IGNORECASE):
+            return True
+        if re.search(r'(?<!\d)' + re.escape(str(me.id)) + r'(?!\d)', text):
+            return True
+        # 표시 이름만으로 판정하면 동명이인 오인식이 생길 수 있어
+        # "홍길동님" 같은 호칭이 있는 경우로 한정합니다.
+        first_name = getattr(me, 'first_name', None)
+        if first_name and len(first_name) >= 2:
+            if re.search(r'(?<!\w)' + re.escape(first_name) + r'\s*님(?!\w)', text):
+                return True
+        for entity in ((getattr(msg, 'entities', None) or []) + (getattr(msg, 'caption_entities', None) or [])):
+            user = getattr(entity, 'user', None)
+            if user and getattr(user, 'id', None) == me.id:
+                return True
+            url = str(getattr(entity, 'url', '') or '')
+            if re.search(r'tg://user\?id=' + re.escape(str(me.id)) + r'(?!\d)', url):
+                return True
+        replied = getattr(msg, 'reply_to_message', None)
+        if replied:
+            author = getattr(replied, 'from_user', None)
+            if author and getattr(author, 'id', None) == me.id:
+                return True
+            for member in (getattr(replied, 'new_chat_members', None) or []):
+                if getattr(member, 'id', None) == me.id:
+                    return True
+        return False
+
+    @staticmethod
+    def _is_tg_channel_url(url):
+        try:
+            parsed = urlsplit(url)
+            if parsed.scheme not in ('https', 'http') or parsed.hostname not in ('t.me', 'telegram.me', 'www.t.me'):
+                return False
+            path = parsed.path.strip('/')
+            # Bot start 링크/댓글 링크/웹앱은 채널 참가 링크와 달라 자동 처리하지 않음
+            if not path or path.startswith(('s/', 'c/', 'share/', 'addstickers/')):
+                return False
+            if parsed.query and ('start=' in parsed.query or 'startapp=' in parsed.query):
+                return False
+            return path.startswith('+') or path.startswith('joinchat/') or '/' not in path
+        except Exception:
+            return False
+
+    async def _process_verification_message(self, app, msg, me, joined_at,
+                                            completed_steps, subscribed_channels):
+        markup = getattr(msg, 'reply_markup', None)
+        if not isinstance(markup, InlineKeyboardMarkup):
+            return False, False
+        if not getattr(msg, 'chat', None) or not self._is_recent(msg, joined_at):
+            return False, False
+
+        sender = getattr(msg, 'from_user', None)
+        if not sender or not getattr(sender, 'is_bot', False):
+            return False, False  # 인증봇 이외 메시지는 자동 클릭하지 않음
+
+        text = str(getattr(msg, 'text', None) or getattr(msg, 'caption', None) or '')
+        rows = markup.inline_keyboard or []
+        buttons = [button for row in rows for button in row]
+        button_labels = ' '.join(str(getattr(b, 'text', '') or '') for b in buttons).lower()
+        hint = (text + ' ' + button_labels).lower()
+        if not any(term in hint for term in self.VERIFY_TERMS):
+            return False, False
+
+        targeted = self._is_for_me(msg, me)
+        if not targeted and self.REQUIRE_PERSONAL_TARGET:
+            self.log_signal.emit(
+                f"⚠️ [{msg.chat.id}] 인증 형태 메시지 발견 (ID {msg.id}), "
+                "하지만 내 계정 대상인지 확인되지 않아 자동 클릭 생략"
+            )
+            return False, False
+
+        acted = False
+        subscription_failed = False
+        for button in buttons:
+            label = str(getattr(button, 'text', '') or '')
+            label_lower = label.lower()
+            url = getattr(button, 'url', None)
+            if not url or not any(word in label_lower for word in self.CHANNEL_BUTTONS):
+                continue
+            if not self._is_tg_channel_url(url):
+                self.log_signal.emit(f"ℹ️ [{msg.chat.id}] 직접 처리 필요한 외부/봇 링크: {label} ({url})")
+                subscription_failed = True
+                continue
+            if url in subscribed_channels:
+                continue
+            self.log_signal.emit(f"🔗 [{msg.chat.id}] '{label}' 채널 링크 참가 시도: {url}")
+            try:
+                await app.join_chat(url)
+                subscribed_channels.add(url)
+                acted = True
+                self.log_signal.emit(f"✅ [{msg.chat.id}] 채널 참가 요청 처리됨: {label}")
+            except UserAlreadyParticipant:
+                subscribed_channels.add(url)
+                acted = True
+                self.log_signal.emit(f"✅ [{msg.chat.id}] 이미 구독 중인 채널: {label}")
+            except Exception as e:
+                subscription_failed = True
+                self.log_signal.emit(f"⚠️ [{msg.chat.id}] 채널 참가 실패: {type(e).__name__}: {e}")
+                if isinstance(e, FloodWait):
+                    return acted, True
+
+        # 채널 구독이 실패했으면 구독 완료 버튼을 눌러 성공인 것처럼 표시하지 않습니다.
+        if subscription_failed:
+            self.log_signal.emit(f"⚠️ [{msg.chat.id}] 구독 선행 조건 미완료. 콜백 클릭 보류")
+            return acted, True
+
+        callback_buttons = []
+        for button in buttons:
+            data = getattr(button, 'callback_data', None)
+            if data is None:
+                continue
+            label = str(getattr(button, 'text', '') or '')
+            lower = label.lower()
+            if any(blocked in lower for blocked in self.DANGEROUS_BUTTONS):
+                continue
+            if any(word in lower for word in self.VERIFY_BUTTONS):
+                callback_buttons.append(button)
+
+        # '60초 이내 버튼 클릭' 등의 안내가 있는데 콜백 버튼이 한 개인 경우
+        # 버튼 이름이 특이해도 검증 버튼으로 간주합니다. 단, 위험 레이블 제외.
+        if not callback_buttons:
+            available = [b for b in buttons if getattr(b, 'callback_data', None) is not None
+                         and not any(x in str(getattr(b, 'text', '') or '').lower() for x in self.DANGEROUS_BUTTONS)]
+            if len(available) == 1 and any(w in hint for w in ('1분', '3분', '60초', '180초', 'within', '버튼')):
+                callback_buttons = available
+
+        if callback_buttons:
+            # 다수의 콜백을 무작정 모두 누르지 않고 가장 가능성이 높은 하나만 처리
+            priority = ('구독 완료', '구독완료', '가입 완료', '인증 완료', '인증', '확인', '입장', '완료', 'verify', 'confirm')
+            callback_buttons.sort(key=lambda b: next(
+                (i for i, p in enumerate(priority) if p in str(getattr(b, 'text', '') or '').lower()),
+                len(priority)))
+            button = callback_buttons[0]
+            label = str(getattr(button, 'text', '') or '')
+            raw_data = getattr(button, 'callback_data', None)
+            signature = (msg.chat.id, msg.id, str(raw_data))
+            if signature not in completed_steps:
+                try:
+                    self.log_signal.emit(f"👆 [{msg.chat.id}] '{label}' 버튼 누르는 중...")
+                    response = await app.request_callback_answer(
+                        chat_id=msg.chat.id, message_id=msg.id,
+                        callback_data=raw_data, timeout=10
+                    )
+                    completed_steps.add(signature)
+                    acted = True
+                    answer = getattr(response, 'message', None)
+                    if answer:
+                        self.log_signal.emit(f"🤖 [{msg.chat.id}] 인증봇 응답: {answer}")
+                    else:
+                        self.log_signal.emit(f"✅ [{msg.chat.id}] '{label}' 콜백 요청 전송됨 (인증 최종 성공은 별도 확인 필요)")
+                except Exception as e:
+                    self.log_signal.emit(f"⚠️ [{msg.chat.id}] '{label}' 버튼 실패: {type(e).__name__}: {e}")
+                    if isinstance(e, FloodWait):
+                        return acted, True
+        return acted, True
+
+    async def handle_bot_verification(self, app, chat_id, me, joined_at, message_queue, buffer):
+        self.log_signal.emit(f"🔍 [{chat_id}] 봇 인증 탐색 시작 (기본 {int(self.INITIAL_VERIFY_WAIT)}초)...")
+        completed_steps = set()
+        subscribed_channels = set()
+        examined = set()
+        actions = 0
+        candidates = list(buffer)
+        try:
+            async for message in app.get_chat_history(chat_id, limit=30):
+                candidates.append(message)
+        except Exception as e:
+            self.log_signal.emit(f"⚠️ [{chat_id}] 최근 메시지 조회 실패: {e}")
+
+        async def process(message):
+            nonlocal actions
+            if not getattr(message, 'chat', None) or message.chat.id != chat_id:
+                return False
+            # edit_version이 다를 때 같은 메시지를 다시 확인
+            version = str(getattr(message, 'edit_date', None) or '')
+            keyboard = getattr(getattr(message, 'reply_markup', None), 'inline_keyboard', []) or []
+            signature = (message.id, version, str([(getattr(b, 'text', None), getattr(b, 'callback_data', None)) for r in keyboard for b in r]))
+            if signature in examined:
+                return False
+            examined.add(signature)
+            acted, relevant = await self._process_verification_message(
+                app, message, me, joined_at, completed_steps, subscribed_channels
+            )
+            if acted:
+                actions += 1
+            return relevant
+
+        for message in candidates:
             if not self._is_running:
                 break
-            await asyncio.sleep(0.1)
+            await process(message)
 
-    def run(self): 
-        if sys.platform == 'win32':
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        asyncio.run(self.auto_join())
+        absolute_end = time.monotonic() + self.MAX_VERIFY_WINDOW
+        idle_end = time.monotonic() + (self.FOLLOWUP_VERIFY_WAIT if actions else self.INITIAL_VERIFY_WAIT)
+        while self._is_running:
+            seconds = min(idle_end, absolute_end) - time.monotonic()
+            if seconds <= 0:
+                break
+            try:
+                # 1초 간격으로 중단 여부를 확인하여 종료 버튼에 빠르게 반응합니다.
+                message = await asyncio.wait_for(message_queue.get(), timeout=min(seconds, 1.0))
+            except asyncio.TimeoutError:
+                continue
+            relevant = await process(message)
+            if relevant:
+                # 유관 메시지를 감지한 뒤에는 후속 편집/봇 메시지를 추가로 기다림
+                idle_end = min(absolute_end, time.monotonic() + self.FOLLOWUP_VERIFY_WAIT)
 
-    # 🌟 봇 인증 처리 비동기 헬퍼 함수 (내 계정 멘션 타겟팅 추가)
-    async def handle_bot_verification(self, app: Client, target_chat, me):
-        self.log_signal.emit(f"⏳ [{target_chat}] 봇 인증 메시지 대기 중 (최대 10초)...")
-        
-        loop = asyncio.get_running_loop()
-        bot_msg_future = loop.create_future()
+        if actions:
+            self.log_signal.emit(f"✅ [{chat_id}] 인증 관련 조작 {actions}회 수행. 최종 가입 권한은 직접/추가 검증 필요")
+        else:
+            self.log_signal.emit(f"ℹ️ [{chat_id}] 본인 대상 인증 조작 없음 (미존재/미감지/수동 인증 필요 가능)")
 
-        async def temp_message_handler(client, message):
-            if message.chat.username and message.chat.username.lower() == target_chat.lower():
-                if message.reply_markup and isinstance(message.reply_markup, InlineKeyboardMarkup):
-                    text = message.text or message.caption or ""
-                    
-                    # 🎯 타겟 검증 로직: 봇 메시지가 '나'를 향한 것인지 확인
-                    is_for_me = False
-                    
-                    if getattr(message, 'mentioned', False):  # 텔레그램 API상 공식 멘션 판정
-                        is_for_me = True
-                    elif me.username and f"@{me.username.lower()}" in text.lower(): # @유저네임 멘션
-                        is_for_me = True
-                    elif me.first_name and me.first_name in text: # 이름(First Name) 호명
-                        is_for_me = True
-                    elif str(me.id) in text: # 고유 ID 포함
-                        is_for_me = True
-                        
-                    # 다른 사람의 인증 메시지라면 무시하고 패스
-                    if not is_for_me:
-                        return
+    async def join_and_verify(self, app, target, me):
+        # 반드시 join_chat 실행 전에 핸들러를 등록합니다.
+        # 입장 이벤트와 동시에 도착하는 인증 메시지의 누락을 방지합니다.
+        messages = asyncio.Queue(maxsize=120)
+        early_messages = deque(maxlen=120)
+        current_chat_id = None
 
-                    if not bot_msg_future.done():
-                        bot_msg_future.set_result(message)
+        async def watch_message(client, message):
+            if not getattr(message, 'chat', None):
+                return
+            if current_chat_id is None:
+                early_messages.append(message)
+            elif message.chat.id == current_chat_id:
+                if messages.full():
+                    try:
+                        messages.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                messages.put_nowait(message)
 
-        handler = app.add_handler(filters.chat(target_chat), temp_message_handler)
-
+        handler_new = app.add_handler(MessageHandler(watch_message, filters.group), group=70)
+        handler_edit = app.add_handler(EditedMessageHandler(watch_message, filters.group), group=70)
         try:
-            msg = await asyncio.wait_for(bot_msg_future, timeout=10.0)
-            self.log_signal.emit(f"🤖 [{target_chat}] 내 계정을 멘션한 인증 봇 감지됨, 처리 시작...")
-            
-            channel_url = None
-            for row in msg.reply_markup.inline_keyboard:
-                for button in row:
-                    if button.url:
-                        channel_url = button.url
-                        break
-            
-            if channel_url:
-                self.log_signal.emit(f"🔗 선행 구독 채널 발견, 입장 시도: {channel_url}")
-                try:
-                    if '+' in channel_url or 'joinchat' in channel_url:
-                        invite_hash = channel_url.split('+')[-1].split('/')[-1]
-                        await app.join_chat(invite_hash) 
-                    else:
-                        channel_name = channel_url.split('/')[-1]
-                        await app.join_chat(channel_name)
-                    self.log_signal.emit(f"✅ 선행 채널 구독 완료")
-                except UserAlreadyParticipant:
-                    pass
-                except Exception as e:
-                    self.log_signal.emit(f"⚠️ 선행 채널 구독 실패: {e}")
-
-                await self.cancellable_sleep(random.uniform(2.5, 4.5))
-            
-            for row in msg.reply_markup.inline_keyboard:
-                for button in row:
-                    if not button.url and button.callback_data: 
-                        self.log_signal.emit(f"👆 [{target_chat}] 최종 확인(콜백) 버튼 클릭 중...")
-                        await app.request_callback_answer(
-                            chat_id=msg.chat.id,
-                            message_id=msg.id,
-                            callback_data=button.callback_data
-                        )
-                        self.log_signal.emit(f"✅ [{target_chat}] 인증 버튼 클릭 완료!")
-                        return
-
-        except asyncio.TimeoutError:
-            self.log_signal.emit(f"⏩ [{target_chat}] 10초 내 내 계정 인증 메시지 없음, 정상 방 간주")
-        except Exception as e:
-            self.log_signal.emit(f"❌ [{target_chat}] 봇 인증 오류: {e}")
+            joined_at = time.time()
+            joined_chat = await app.join_chat(target)
+            current_chat_id = joined_chat.id
+            self.log_signal.emit(f"✅ 입장 완료: {target} (채팅 ID: {current_chat_id})")
+            await self.handle_bot_verification(
+                app, current_chat_id, me, joined_at, messages, list(early_messages)
+            )
+            return joined_chat
         finally:
-            app.remove_handler(handler)
+            app.remove_handler(*handler_new)
+            app.remove_handler(*handler_edit)
 
     async def auto_join(self):
-        app = Client("joiner_session", api_id=self.api_id, api_hash=self.api_hash, workdir=DATA_DIR)
-        self.log_signal.emit("\n🚀 자동 인입 매크로 가동 시작...")
-        
+        app = Client('joiner_session', api_id=self.api_id, api_hash=self.api_hash, workdir=DATA_DIR)
+        self.log_signal.emit("\n🚀 자동 인입 + 가입 후 인증 탐색 시작...")
         async with app:
-            # 🌟 시작 시점에 내 텔레그램 계정 정보(이름, 유저네임, ID)를 미리 로드
             me = await app.get_me()
-            self.log_signal.emit(f"👤 내 계정 인식 완료: {me.first_name} (ID: {me.id})")
-
-            self.log_signal.emit("🔍 [최적화] 기존 가입 방 목록을 분석 중입니다... (잠시만 대기)")
+            self.log_signal.emit(f"👤 계정 인식: {me.first_name} (ID: {me.id})")
             joined_public_chats = set()
             try:
                 async for dialog in app.get_dialogs():
-                    if not self._is_running: break
+                    if not self._is_running:
+                        break
                     if dialog.chat and dialog.chat.username:
                         joined_public_chats.add(dialog.chat.username.lower())
-                self.log_signal.emit(f"💡 총 {len(joined_public_chats)}개의 방 목록 캐싱 완료!")
+                self.log_signal.emit(f"💡 이미 가입한 공개방 {len(joined_public_chats)}개 확인")
             except Exception as e:
-                self.log_signal.emit(f"⚠️ 방 목록 동기화 중 오류 발생: {e}")
+                self.log_signal.emit(f"⚠️ 기존 가입 목록 조회 오류: {e}")
 
-            total_links = len(self.links)
-            
-            for idx, link in enumerate(self.links, 1):
+            for idx, link in enumerate(self.links, start=1):
                 if not self._is_running:
-                    self.log_signal.emit("🛑 사용자에 의해 작업이 중단되었습니다.")
+                    self.log_signal.emit('🛑 중단 요청 감지')
                     break
-
-                link = link.strip()
-                if not link: continue
-                
-                self.log_signal.emit(f"\n📊 [진행 상황] 총 {total_links}방 중 {idx}번째 방 진행 중...")
-                
-                target_chat = link
-                is_public = False
-                
-                if "t.me/" in target_chat and "+" not in target_chat and "joinchat" not in target_chat:
-                    target_chat = target_chat.split("t.me/")[-1].strip()
-                    target_chat = target_chat.split("/")[0].split("?")[0]
-                    is_public = True
-                
-                if is_public and target_chat.lower() in joined_public_chats:
-                    self.log_signal.emit(f"⚡ [초고속 스킵] 이미 가입된 방: {link}")
-                    continue 
-                
-                joined = False
-                while not joined and self._is_running:
+                if not link.strip():
+                    continue
+                self.log_signal.emit(f"\n📊 [{idx}/{len(self.links)}] 처리: {link}")
+                try:
+                    target, is_public = self.normalize_link(link)
+                except ValueError as e:
+                    self.log_signal.emit(f"❌ 링크 형식 오류: {e}")
+                    continue
+                if is_public and target.lower() in joined_public_chats:
+                    self.log_signal.emit(f"⏩ 이미 참가한 공개방 스킵: {target}")
+                    continue
+                while self._is_running:
                     try:
-                        self.log_signal.emit(f"▶ 입장 시도 중: {link}")
-                        await app.join_chat(target_chat) 
-                        self.log_signal.emit(f"✅ 입장 완료: {link}")
-                        
+                        await self.join_and_verify(app, target, me)
                         if is_public:
-                            joined_public_chats.add(target_chat.lower())
-                            
-                        joined = True
-                        
-                        # 🌟 봇 인증 처리 함수에 내 계정 정보(me) 전달
-                        if is_public:
-                            await self.handle_bot_verification(app, target_chat, me)
-                        
-                        delay = random.uniform(15, 35)
-                        self.log_signal.emit(f"휴식: {int(delay)}초 대기...")
-                        await self.cancellable_sleep(delay)
-
+                            joined_public_chats.add(target.lower())
+                        await self.cancellable_sleep(random.uniform(15, 35))
+                        break
                     except UserAlreadyParticipant:
-                        self.log_signal.emit(f"⏩ [비공개 스킵] 이미 입장된 방입니다: {link}")
-                        await self.cancellable_sleep(random.uniform(2, 4))
-                        break 
-
+                        self.log_signal.emit(f"⏩ 이미 참가한 방 스킵: {link}")
+                        if is_public:
+                            joined_public_chats.add(target.lower())
+                        break
                     except FloodWait as e:
-                        wait_time = e.value
-                        self.log_signal.emit(f"🚨 [플러드 웨이트] 서버 제한 조치로 {wait_time}초 대기합니다.")
+                        wait_time = int(e.value)
+                        self.log_signal.emit(f"🚨 서버 요청 제한: {wait_time}초 대기")
                         await self.cancellable_sleep(wait_time)
-                        if not self._is_running: break
-                        
-                        extra_delay = random.uniform(60, 120)
-                        self.log_signal.emit(f"🛡️ [계정 보호] 추가로 {int(extra_delay)}초 대기합니다...")
-                        await self.cancellable_sleep(extra_delay)
-                        
+                        if not self._is_running:
+                            break
+                        await self.cancellable_sleep(random.uniform(60, 120))
                     except Exception as e:
-                        self.log_signal.emit(f"❌ 입장 실패 ({link}): {e}")
-                        break 
-                        
-        self.finished_signal.emit()
+                        self.log_signal.emit(f"❌ 그룹 참가/검증 실패 ({link}): {type(e).__name__}: {e}")
+                        break
 
 # ==========================================
 # 🚀 3. 메인 대시보드 UI
