@@ -98,7 +98,10 @@ class JoinWorker(QThread):
     REQUIRE_PERSONAL_TARGET = True
 
     VERIFY_TERMS = ("인증", "확인", "입장", "참여", "구독", "가입", "버튼", "verify", "verification", "join")
-    VERIFY_BUTTONS = ("인증", "확인", "완료", "입장", "참여", "통과", "시작", "verify", "check", "confirm", "continue", "start")
+    VERIFY_BUTTONS = ("인증", "확인", "완료", "입장", "참여", "통과", "시작",
+                      "구독했습니다", "구독했어요", "구독완료", "구독 완료",
+                      "가입했습니다", "가입했어요", "가입완료", "가입 완료",
+                      "verify", "check", "confirm", "continue", "start")
     CHANNEL_BUTTONS = ("채널", "구독", "가입", "join", "subscribe")
     DANGEROUS_BUTTONS = ("취소", "거절", "탈퇴", "나가기", "차단", "신고", "cancel", "reject", "leave", "report")
 
@@ -258,21 +261,37 @@ class JoinWorker(QThread):
                 self.log_signal.emit(f"ℹ️ [{msg.chat.id}] 직접 처리 필요한 외부/봇 링크: {label} ({url})")
                 subscription_failed = True
                 continue
-            if url in subscribed_channels:
-                continue
-            self.log_signal.emit(f"🔗 [{msg.chat.id}] '{label}' 채널 링크 참가 시도: {url}")
+            # 공개 채널 링크를 그대로 join_chat()에 넘기면 Hydrogram이 URL 전체를
+            # username으로 해석하여 USERNAME_INVALID를 내는 버전이 있습니다.
+            #   http://t.me/info13134  ->  info13134
+            #   https://t.me/+abcdef   ->  원본 초대 링크 유지
             try:
-                await app.join_chat(url)
-                subscribed_channels.add(url)
+                channel_target, is_public_channel = self.normalize_link(url)
+            except ValueError as e:
+                subscription_failed = True
+                self.log_signal.emit(f"⚠️ [{msg.chat.id}] 구독 링크 변환 실패: {url} ({e})")
+                continue
+            channel_key = channel_target.lower() if is_public_channel else channel_target
+            if channel_key in subscribed_channels:
+                continue
+            self.log_signal.emit(
+                f"🔗 [{msg.chat.id}] '{label}' 채널 참가: {url} → {channel_target}"
+            )
+            try:
+                await app.join_chat(channel_target)
+                subscribed_channels.add(channel_key)
                 acted = True
-                self.log_signal.emit(f"✅ [{msg.chat.id}] 채널 참가 요청 처리됨: {label}")
+                self.log_signal.emit(f"✅ [{msg.chat.id}] 채널 참가 성공: {channel_target}")
             except UserAlreadyParticipant:
-                subscribed_channels.add(url)
+                subscribed_channels.add(channel_key)
                 acted = True
-                self.log_signal.emit(f"✅ [{msg.chat.id}] 이미 구독 중인 채널: {label}")
+                self.log_signal.emit(f"✅ [{msg.chat.id}] 기존 구독 확인: {channel_target}")
             except Exception as e:
                 subscription_failed = True
-                self.log_signal.emit(f"⚠️ [{msg.chat.id}] 채널 참가 실패: {type(e).__name__}: {e}")
+                self.log_signal.emit(
+                    f"⚠️ [{msg.chat.id}] 채널 참가 실패: {channel_target} "
+                    f"({type(e).__name__}: {e})"
+                )
                 if isinstance(e, FloodWait):
                     return acted, True
 
@@ -303,7 +322,9 @@ class JoinWorker(QThread):
 
         if callback_buttons:
             # 다수의 콜백을 무작정 모두 누르지 않고 가장 가능성이 높은 하나만 처리
-            priority = ('구독 완료', '구독완료', '가입 완료', '인증 완료', '인증', '확인', '입장', '완료', 'verify', 'confirm')
+            priority = ('구독했습니다', '구독했어요', '구독 완료', '구독완료',
+                        '가입했습니다', '가입했어요', '가입 완료', '가입완료',
+                        '인증 완료', '인증', '확인', '입장', '완료', 'verify', 'confirm')
             callback_buttons.sort(key=lambda b: next(
                 (i for i, p in enumerate(priority) if p in str(getattr(b, 'text', '') or '').lower()),
                 len(priority)))
