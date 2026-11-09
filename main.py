@@ -89,7 +89,7 @@ class JoinWorker(QThread):
 
     # 신규 인증 메시지는 이 시간 동안 탐색합니다. 전체 3분 제한과는 다르게,
     # 인증 문구가 *도착하는 시점*을 기다리는 시간입니다.
-    INITIAL_VERIFY_WAIT = 40.0
+    INITIAL_VERIFY_WAIT = 15.0
     FOLLOWUP_VERIFY_WAIT = 12.0
     MAX_VERIFY_WINDOW = 180.0
 
